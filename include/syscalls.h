@@ -9,7 +9,7 @@
 #include <windows.h>
 #include "syscalls-asm.h"
 
-#define SW2_SEED 0x1FD3BF2C
+#define SW2_SEED 0x1337C0DE
 #define SW2_ROL8(v) (v << 8 | v >> 24)
 #define SW2_ROR8(v) (v >> 8 | v << 24)
 #define SW2_ROX8(v) ((SW2_SEED % 2) ? SW2_ROL8(v) : SW2_ROR8(v))
@@ -150,34 +150,20 @@ EXTERN_C NTSTATUS NtReadVirtualMemory(
 	IN SIZE_T BufferSize,
 	OUT PSIZE_T NumberOfBytesRead OPTIONAL) asm ("NtReadVirtualMemory");
 
-#ifdef _WIN64
 EXTERN_C NTSTATUS NtClose(
 	IN HANDLE Handle) asm ("NtClose");
-#else
-EXTERN_C NTSTATUS _NtClose(
-	IN HANDLE Handle) asm ("_NtClose");
-#endif
 
 EXTERN_C NTSTATUS NtOpenProcessToken(
 	IN HANDLE ProcessHandle,
 	IN ACCESS_MASK DesiredAccess,
 	OUT PHANDLE TokenHandle) asm ("NtOpenProcessToken");
 
-#ifdef _WIN64
 EXTERN_C NTSTATUS NtQueryInformationProcess(
 	IN HANDLE ProcessHandle,
 	IN PROCESSINFOCLASS ProcessInformationClass,
 	OUT PVOID ProcessInformation,
 	IN ULONG ProcessInformationLength,
 	OUT PULONG ReturnLength OPTIONAL) asm ("NtQueryInformationProcess");
-#else
-EXTERN_C NTSTATUS _NtQueryInformationProcess(
-	IN HANDLE ProcessHandle,
-	IN PROCESSINFOCLASS ProcessInformationClass,
-	OUT PVOID ProcessInformation,
-	IN ULONG ProcessInformationLength,
-	OUT PULONG ReturnLength OPTIONAL) asm ("_NtQueryInformationProcess");
-#endif
 
 EXTERN_C NTSTATUS NtQueryVirtualMemory(
 	IN HANDLE ProcessHandle,
@@ -209,7 +195,6 @@ EXTERN_C NTSTATUS NtFreeVirtualMemory(
 	IN OUT PSIZE_T RegionSize,
 	IN ULONG FreeType) asm ("NtFreeVirtualMemory");
 
-#ifdef _WIN64
 EXTERN_C NTSTATUS NtCreateFile(
 	OUT PHANDLE FileHandle,
 	IN ACCESS_MASK DesiredAccess,
@@ -222,20 +207,6 @@ EXTERN_C NTSTATUS NtCreateFile(
 	IN ULONG CreateOptions,
 	IN PVOID EaBuffer OPTIONAL,
 	IN ULONG EaLength) asm ("NtCreateFile");
-#else
-EXTERN_C NTSTATUS _NtCreateFile(
-	OUT PHANDLE FileHandle,
-	IN ACCESS_MASK DesiredAccess,
-	IN POBJECT_ATTRIBUTES ObjectAttributes,
-	OUT PIO_STATUS_BLOCK IoStatusBlock,
-	IN PLARGE_INTEGER AllocationSize OPTIONAL,
-	IN ULONG FileAttributes,
-	IN ULONG ShareAccess,
-	IN ULONG CreateDisposition,
-	IN ULONG CreateOptions,
-	IN PVOID EaBuffer OPTIONAL,
-	IN ULONG EaLength) asm ("_NtCreateFile");
-#endif
 
 EXTERN_C NTSTATUS NtWriteFile(
 	IN HANDLE FileHandle,
@@ -247,5 +218,37 @@ EXTERN_C NTSTATUS NtWriteFile(
 	IN ULONG Length,
 	IN PLARGE_INTEGER ByteOffset OPTIONAL,
 	IN PULONG Key OPTIONAL) asm ("NtWriteFile");
+
+EXTERN_C NTSTATUS NtCreateProcess(
+	OUT PHANDLE ProcessHandle,
+	IN ACCESS_MASK DesiredAccess,
+	IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+	IN HANDLE ParentProcess,
+	IN BOOLEAN InheritObjectTable,
+	IN HANDLE SectionHandle OPTIONAL,
+	IN HANDLE DebugPort OPTIONAL,
+	IN HANDLE ExceptionPort OPTIONAL) asm ("NtCreateProcess");
+
+EXTERN_C NTSTATUS NtQuerySystemInformation(
+	IN SYSTEM_INFORMATION_CLASS SystemInformationClass,
+	IN OUT PVOID SystemInformation,
+	IN ULONG SystemInformationLength,
+	OUT PULONG ReturnLength OPTIONAL) asm ("NtQuerySystemInformation");
+
+EXTERN_C NTSTATUS NtDuplicateObject(
+	IN HANDLE SourceProcessHandle,
+	IN HANDLE SourceHandle,
+	IN HANDLE TargetProcessHandle OPTIONAL,
+	OUT PHANDLE TargetHandle OPTIONAL,
+	IN ACCESS_MASK DesiredAccess,
+	IN ULONG HandleAttributes,
+	IN ULONG Options) asm ("NtDuplicateObject");
+
+EXTERN_C NTSTATUS NtQueryObject(
+	IN HANDLE Handle,
+	IN OBJECT_INFORMATION_CLASS ObjectInformationClass,
+	OUT PVOID ObjectInformation OPTIONAL,
+	IN ULONG ObjectInformationLength,
+	OUT PULONG ReturnLength OPTIONAL) asm ("NtQueryObject");
 
 #endif

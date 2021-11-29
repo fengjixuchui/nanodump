@@ -6,8 +6,20 @@
 SW2_SYSCALL_LIST SW2_SyscallList __attribute__ ((section(".data")));
 PVOID SyscallAddress __attribute__ ((section(".data"))) = NULL;
 
+/*
+ * If no 'syscall' instruction is found in NTDLL,
+ * this function will be called.
+ * By default just returns STATUS_NOT_FOUND.
+ * The idea is to avoid having a 'syscall' instruction
+ * on this program's .text section to evade static analysis
+ */
 __attribute__((naked)) void DoSysenter(void)
 {
+    __asm__("DoSysenter: \n\
+        mov eax, 0xC0000225 \n\
+        ret \n\
+    ");
+    /*
 #ifdef _WIN64
     __asm__("DoSysenter: \n\
         syscall \n\
@@ -19,6 +31,7 @@ __attribute__((naked)) void DoSysenter(void)
       ret \n\
     ");
 #endif
+    */
 }
 
 /*
@@ -30,6 +43,15 @@ PVOID GetSyscallAddress(void)
 {
     // Return early if the SyscallAddress is already defined
     if (SyscallAddress) return SyscallAddress;
+
+#ifndef _WIN64
+    if (IsWoW64())
+    {
+        // if we are a WoW64 process, jump to WOW32Reserved
+        SyscallAddress = (PVOID)READ_MEMLOC(0xc0);
+        return SyscallAddress;
+    }
+#endif
 
     // set the fallback as the default
     SyscallAddress = (PVOID)DoSysenter;
@@ -54,7 +76,7 @@ PVOID GetSyscallAddress(void)
         DWORD VirtualAddress = DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
         if (VirtualAddress == 0) continue;
 
-        ExportDirectory = (PIMAGE_EXPORT_DIRECTORY)SW2_RVA2VA(ULONG_PTR, DllBase, VirtualAddress);
+        ExportDirectory = SW2_RVA2VA(PIMAGE_EXPORT_DIRECTORY, DllBase, VirtualAddress);
 
         // If this is NTDLL.dll, exit loop.
         PCHAR DllName = SW2_RVA2VA(PCHAR, DllBase, ExportDirectory->Name);
@@ -78,7 +100,8 @@ PVOID GetSyscallAddress(void)
 #endif
 
     PVOID CurrentAddress = BaseOfCode;
-    while ((ULONGSIZE)CurrentAddress <= (ULONGSIZE)BaseOfCode + SizeOfCode - sizeof(syscall_code) + 1)
+    PVOID EndOfCode = SW2_RVA2VA(PVOID, BaseOfCode, SizeOfCode - sizeof(syscall_code) + 1);
+    while ((ULONG_PTR)CurrentAddress <= (ULONG_PTR)EndOfCode)
     {
         if (!MSVCRT$strncmp((PVOID)syscall_code, CurrentAddress, sizeof(syscall_code)))
         {
@@ -86,7 +109,8 @@ PVOID GetSyscallAddress(void)
             SyscallAddress = CurrentAddress;
             return SyscallAddress;
         }
-        CurrentAddress = (PVOID)((ULONGSIZE)CurrentAddress + 1);
+        // increase the current address by one
+        CurrentAddress = SW2_RVA2VA(PVOID, CurrentAddress, 1);
     }
     // syscall entry not found, using fallback
     return SyscallAddress;
@@ -99,7 +123,7 @@ DWORD SW2_HashSyscall(PCSTR FunctionName)
 
     while (FunctionName[i])
     {
-        WORD PartialName = *(WORD*)((ULONGSIZE)FunctionName + i++);
+        WORD PartialName = *(WORD*)((ULONG_PTR)FunctionName + i++);
         Hash ^= PartialName + SW2_ROR8(Hash);
     }
 
@@ -128,7 +152,7 @@ BOOL SW2_PopulateSyscallList(void)
         DWORD VirtualAddress = DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
         if (VirtualAddress == 0) continue;
 
-        ExportDirectory = (PIMAGE_EXPORT_DIRECTORY)SW2_RVA2VA(ULONG_PTR, DllBase, VirtualAddress);
+        ExportDirectory = SW2_RVA2VA(PIMAGE_EXPORT_DIRECTORY, DllBase, VirtualAddress);
 
         // If this is NTDLL.dll, exit loop.
         PCHAR DllName = SW2_RVA2VA(PCHAR, DllBase, ExportDirectory->Name);

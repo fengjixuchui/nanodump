@@ -8,32 +8,40 @@
 #define NT_SUCCESS(Status) ((NTSTATUS)(Status) >= 0)
 #endif
 
+#define MAX_PROCESSES 5000
+
 #define STATUS_PARTIAL_COPY 0x8000000D
 #define STATUS_ACCESS_DENIED 0xC0000022
 #define STATUS_OBJECT_PATH_NOT_FOUND 0xC000003A
 #define STATUS_NO_MORE_ENTRIES 0x8000001A
 #define STATUS_INVALID_CID 0xC000000B
+#define STATUS_INFO_LENGTH_MISMATCH 0xC0000004
+
+#define SystemHandleInformation 0x10
+#define ObjectTypeInformation 2
 
 #define CALLBACK_FILE       0x02
 #define CALLBACK_FILE_WRITE 0x08
 #define CALLBACK_FILE_CLOSE 0x09
+
+#define MEM_COMMIT 0x1000
+//#define MEM_IMAGE 0x1000000
+#define MEM_MAPPED 0x40000
+#define PAGE_NOACCESS 0x01
+#define PAGE_GUARD 0x100
 
 // 70 MiB
 #define DUMP_MAX_SIZE 0x4600000
 // 900 KiB
 #define CHUNK_SIZE 0xe1000
 
-#ifdef _WIN64
-#define ULONGSIZE ULONG64
-#else
-#define ULONGSIZE ULONG32
-#endif
-
 #ifndef _WIN64
-// for some reason, x86 has conflicting types with these functions
+// x86 has conflicting types with these functions
 #define NtClose _NtClose
 #define NtQueryInformationProcess _NtQueryInformationProcess
 #define NtCreateFile _NtCreateFile
+#define NtQuerySystemInformation _NtQuerySystemInformation
+#define NtQueryObject _NtQueryObject
 #endif
 
 #ifdef _WIN64
@@ -219,3 +227,19 @@ struct linked_list
 {
     struct linked_list* next;
 };
+
+typedef struct SYSTEM_HANDLE_TABLE_ENTRY_INFO
+{
+    ULONG ProcessId;
+    BYTE ObjectTypeNumber;
+    BYTE Flags;
+    USHORT Handle;
+    PVOID Object;
+    ACCESS_MASK GrantedAccess;
+} SYSTEM_HANDLE_TABLE_ENTRY_INFO, *PSYSTEM_HANDLE_TABLE_ENTRY_INFO;
+
+typedef struct _PROCESS_LIST
+{
+    ULONG Count;
+    ULONG ProcessId[MAX_PROCESSES];
+} PROCESS_LIST, *PPROCESS_LIST;
