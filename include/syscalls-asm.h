@@ -3,8 +3,8 @@
 
 #if _WIN64
 
-#define IsWoW64 IsWoW64
-__asm__("IsWoW64: \n\
+#define local_is_wow64 local_is_wow64
+__asm__("local_is_wow64: \n\
 	mov rax, 0 \n\
 	ret \n\
 ");
@@ -377,10 +377,79 @@ __asm__("NtQueryObject: \n\
 	jmp r11 \n\
 ");
 
+#define ZwWaitForSingleObject NtWaitForSingleObject
+__asm__("NtWaitForSingleObject: \n\
+	push rcx \n\
+	push rdx \n\
+	push r8 \n\
+	push r9 \n\
+	sub rsp, 0x28 \n\
+	call GetSyscallAddress \n\
+	add rsp, 0x28 \n\
+	push rax \n\
+	sub rsp, 0x28 \n\
+	mov ecx, 0x426376E3 \n\
+	call SW2_GetSyscallNumber \n\
+	add rsp, 0x28 \n\
+	pop r11 \n\
+	pop r9 \n\
+	pop r8 \n\
+	pop rdx \n\
+	pop rcx \n\
+	mov r10, rcx \n\
+	jmp r11 \n\
+");
+
+#define ZwDeleteFile NtDeleteFile
+__asm__("NtDeleteFile: \n\
+	push rcx \n\
+	push rdx \n\
+	push r8 \n\
+	push r9 \n\
+	sub rsp, 0x28 \n\
+	call GetSyscallAddress \n\
+	add rsp, 0x28 \n\
+	push rax \n\
+	sub rsp, 0x28 \n\
+	mov ecx, 0x64B26A1A \n\
+	call SW2_GetSyscallNumber \n\
+	add rsp, 0x28 \n\
+	pop r11 \n\
+	pop r9 \n\
+	pop r8 \n\
+	pop rdx \n\
+	pop rcx \n\
+	mov r10, rcx \n\
+	jmp r11 \n\
+");
+
+#define ZwTerminateProcess NtTerminateProcess
+__asm__("NtTerminateProcess: \n\
+	push rcx \n\
+	push rdx \n\
+	push r8 \n\
+	push r9 \n\
+	sub rsp, 0x28 \n\
+	call GetSyscallAddress \n\
+	add rsp, 0x28 \n\
+	push rax \n\
+	sub rsp, 0x28 \n\
+	mov ecx, 0x652E64A0 \n\
+	call SW2_GetSyscallNumber \n\
+	add rsp, 0x28 \n\
+	pop r11 \n\
+	pop r9 \n\
+	pop r8 \n\
+	pop rdx \n\
+	pop rcx \n\
+	mov r10, rcx \n\
+	jmp r11 \n\
+");
+
 #else
 
-#define IsWoW64 IsWoW64
-__asm__("IsWoW64: \n\
+#define local_is_wow64 local_is_wow64
+__asm__("local_is_wow64: \n\
 	mov eax, fs:[0xc0] \n\
 	test eax, eax \n\
 	jne wow64 \n\
@@ -606,6 +675,48 @@ __asm__("NtQueryObject: \n\
 	call GetSyscallAddress \n\
 	push eax \n\
 	push 0x0E23F64F \n\
+	call SW2_GetSyscallNumber \n\
+	add esp, 4 \n\
+	pop ebx \n\
+	mov edx, esp \n\
+	sub edx, 4 \n\
+	call ebx \n\
+	ret \n\
+");
+
+#define ZwWaitForSingleObject NtWaitForSingleObject
+__asm__("NtWaitForSingleObject: \n\
+	call GetSyscallAddress \n\
+	push eax \n\
+	push 0x426376E3 \n\
+	call SW2_GetSyscallNumber \n\
+	add esp, 4 \n\
+	pop ebx \n\
+	mov edx, esp \n\
+	sub edx, 4 \n\
+	call ebx \n\
+	ret \n\
+");
+
+#define ZwDeleteFile NtDeleteFile
+__asm__("NtDeleteFile: \n\
+	call GetSyscallAddress \n\
+	push eax \n\
+	push 0x64B26A1A \n\
+	call SW2_GetSyscallNumber \n\
+	add esp, 4 \n\
+	pop ebx \n\
+	mov edx, esp \n\
+	sub edx, 4 \n\
+	call ebx \n\
+	ret \n\
+");
+
+#define ZwTerminateProcess NtTerminateProcess
+__asm__("NtTerminateProcess: \n\
+	call GetSyscallAddress \n\
+	push eax \n\
+	push 0x652E64A0 \n\
 	call SW2_GetSyscallNumber \n\
 	add esp, 4 \n\
 	pop ebx \n\
