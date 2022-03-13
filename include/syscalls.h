@@ -24,6 +24,7 @@
  #define NtCreateFile _NtCreateFile
  #define NtQuerySystemInformation _NtQuerySystemInformation
  #define NtWaitForSingleObject _NtWaitForSingleObject
+ #define NtQueryInformationFile _NtQueryInformationFile
 #endif
 // Typedefs are prefixed to avoid pollution.
 
@@ -31,6 +32,7 @@ typedef struct _SW2_SYSCALL_ENTRY
 {
     DWORD Hash;
     DWORD Address;
+    PVOID SyscallAddress;
 } SW2_SYSCALL_ENTRY, *PSW2_SYSCALL_ENTRY;
 
 typedef struct _SW2_SYSCALL_LIST
@@ -60,16 +62,26 @@ typedef struct _SW2_PEB {
 	PSW2_PEB_LDR_DATA Ldr;
 } SW2_PEB, *PSW2_PEB;
 
-DWORD SW2_HashSyscall(PCSTR FunctionName);
-BOOL SW2_PopulateSyscallList(void);
-BOOL local_is_wow64(void);
-void SyscallNotFound(void);
+DWORD SW2_HashSyscall(
+    IN PCSTR FunctionName);
+
+PVOID GetSyscallAddress(
+    IN PVOID NtApiAddress);
+
+BOOL SW2_PopulateSyscallList(VOID);
+
+BOOL local_is_wow64(VOID);
+
+PVOID getIP(VOID);
+
+void SyscallNotFound(VOID);
+
 #if defined(__GNUC__)
-DWORD SW2_GetSyscallNumber(DWORD FunctionHash) asm ("SW2_GetSyscallNumber");
-PVOID GetSyscallAddress(void) asm ("GetSyscallAddress");
+DWORD SW2_GetSyscallNumber(IN DWORD FunctionHash) asm ("SW2_GetSyscallNumber");
+PVOID SW3_GetSyscallAddress(IN DWORD FunctionHash) asm ("SW3_GetSyscallAddress");
 #else
-DWORD SW2_GetSyscallNumber(DWORD FunctionHash);
-PVOID GetSyscallAddress(void);
+DWORD SW2_GetSyscallNumber(IN DWORD FunctionHash);
+PVOID SW3_GetSyscallAddress(IN DWORD FunctionHash);
 #endif
 
 //typedef struct _IO_STATUS_BLOCK
@@ -124,6 +136,30 @@ typedef enum _MEMORY_INFORMATION_CLASS
 	MemoryEnclaveImageInformation,
 	MemoryBasicInformationCapped
 } MEMORY_INFORMATION_CLASS, *PMEMORY_INFORMATION_CLASS;
+
+//typedef enum _THREADINFOCLASS
+//{
+//	ThreadBasicInformation,
+//	ThreadTimes,
+//	ThreadPriority,
+//	ThreadBasePriority,
+//	ThreadAffinityMask,
+//	ThreadImpersonationToken,
+//	ThreadDescriptorTableEntry,
+//	ThreadEnableAlignmentFaultFixup,
+//	ThreadEventPair_Reusable,
+//	ThreadQuerySetWin32StartAddress,
+//	ThreadZeroTlsCell,
+//	ThreadPerformanceCount,
+//	ThreadAmILastThread,
+//	ThreadIdealProcessor,
+//	ThreadPriorityBoost,
+//	ThreadSetTlsArrayAddress,
+//	ThreadIsIoPending,
+//	ThreadHideFromDebugger,
+//	ThreadBreakOnTermination,
+//	MaxThreadInfoClass
+//} THREADINFOCLASS, *PTHREADINFOCLASS;
 
 //typedef struct _CLIENT_ID
 //{
@@ -283,5 +319,86 @@ EXTERN_C NTSTATUS NtSetInformationProcess_(
 	IN PROCESSINFOCLASS ProcessInformationClass,
 	IN PVOID ProcessInformation,
 	IN ULONG Length);
+
+EXTERN_C NTSTATUS NtQueryInformationToken(
+	IN HANDLE TokenHandle,
+	IN TOKEN_INFORMATION_CLASS TokenInformationClass,
+	OUT PVOID TokenInformation,
+	IN ULONG TokenInformationLength,
+	OUT PULONG ReturnLength);
+
+EXTERN_C NTSTATUS NtDuplicateToken(
+	IN HANDLE ExistingTokenHandle,
+	IN ACCESS_MASK DesiredAccess,
+	IN POBJECT_ATTRIBUTES ObjectAttributes,
+	IN BOOLEAN EffectiveOnly,
+	IN TOKEN_TYPE TokenType,
+	OUT PHANDLE NewTokenHandle);
+
+EXTERN_C NTSTATUS NtSetInformationThread(
+	IN HANDLE ThreadHandle,
+	IN THREADINFOCLASS ThreadInformationClass,
+	IN PVOID ThreadInformation,
+	IN ULONG ThreadInformationLength);
+
+EXTERN_C NTSTATUS NtCreateDirectoryObjectEx(
+	OUT PHANDLE DirectoryHandle,
+	IN ACCESS_MASK DesiredAccess,
+	IN POBJECT_ATTRIBUTES ObjectAttributes,
+	IN HANDLE ShadowDirectoryHandle,
+	IN ULONG Flags);
+
+EXTERN_C NTSTATUS NtCreateSymbolicLinkObject(
+	OUT PHANDLE LinkHandle,
+	IN ACCESS_MASK DesiredAccess,
+	IN POBJECT_ATTRIBUTES ObjectAttributes,
+	IN PUNICODE_STRING LinkTarget);
+
+EXTERN_C NTSTATUS NtOpenSymbolicLinkObject(
+	OUT PHANDLE LinkHandle,
+	IN ACCESS_MASK DesiredAccess,
+	IN POBJECT_ATTRIBUTES ObjectAttributes);
+
+EXTERN_C NTSTATUS NtQuerySymbolicLinkObject(
+	IN HANDLE LinkHandle,
+	IN OUT PUNICODE_STRING LinkTarget,
+	OUT PULONG ReturnedLength OPTIONAL);
+
+EXTERN_C NTSTATUS NtCreateSection(
+	OUT PHANDLE SectionHandle,
+	IN ACCESS_MASK DesiredAccess,
+	IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+	IN PLARGE_INTEGER MaximumSize OPTIONAL,
+	IN ULONG SectionPageProtection,
+	IN ULONG AllocationAttributes,
+	IN HANDLE FileHandle OPTIONAL);
+
+EXTERN_C NTSTATUS NtOpenThreadToken(
+	IN HANDLE ThreadHandle,
+	IN ACCESS_MASK DesiredAccess,
+	IN BOOLEAN OpenAsSelf,
+	OUT PHANDLE TokenHandle);
+
+EXTERN_C NTSTATUS NtCreateTransaction(
+	OUT PHANDLE TransactionHandle,
+	IN ACCESS_MASK DesiredAccess,
+	IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+	IN LPGUID Uow OPTIONAL,
+	IN HANDLE TmHandle OPTIONAL,
+	IN ULONG CreateOptions OPTIONAL,
+	IN ULONG IsolationLevel OPTIONAL,
+	IN ULONG IsolationFlags OPTIONAL,
+	IN PLARGE_INTEGER Timeout OPTIONAL,
+	IN PUNICODE_STRING Description OPTIONAL);
+
+EXTERN_C NTSTATUS NtQueryInformationFile(
+	IN HANDLE FileHandle,
+	OUT PIO_STATUS_BLOCK IoStatusBlock,
+	OUT PVOID FileInformation,
+	IN ULONG Length,
+	IN FILE_INFORMATION_CLASS FileInformationClass);
+
+EXTERN_C NTSTATUS NtMakeTemporaryObject(
+	IN HANDLE Handle);
 
 #endif

