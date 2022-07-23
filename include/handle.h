@@ -145,6 +145,26 @@ typedef struct _SYSTEM_HANDLE_TABLE_ENTRY_INFO
     ULONG GrantedAccess;
 } SYSTEM_HANDLE_TABLE_ENTRY_INFO, * PSYSTEM_HANDLE_TABLE_ENTRY_INFO;
 
+#define MAX_HANDLES 10000
+
+typedef struct _HANDLE_LIST
+{
+    ULONG Count;
+    HANDLE Handle[MAX_HANDLES];
+} HANDLE_LIST, *PHANDLE_LIST;
+
+PHANDLE_LIST find_token_handles_in_process(
+    IN DWORD process_pid,
+    IN DWORD permissions);
+
+PHANDLE_LIST find_process_handles_in_process(
+    IN DWORD process_pid,
+    IN DWORD permissions);
+
+BOOL check_handle_privs(
+    IN HANDLE handle,
+    IN DWORD permissions);
+
 HANDLE make_handle_full_access(
     IN HANDLE hProcess);
 
@@ -153,6 +173,7 @@ HANDLE obtain_lsass_handle(
     IN DWORD permissions,
     IN BOOL dup,
     IN BOOL seclogon_race,
+    IN DWORD spoof_stack,
     IN BOOL is_malseclogon_stage_2,
     IN LPCSTR dump_path);
 

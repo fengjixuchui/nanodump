@@ -9,15 +9,6 @@
 
 #if defined(NANO) && !defined(SSP)
 
-#define MAX_HANDLES 10000
-#define INVALID_HANDLE 6
-
-typedef struct _HANDLE_LIST
-{
-    ULONG Count;
-    HANDLE Handle[MAX_HANDLES];
-} HANDLE_LIST, *PHANDLE_LIST;
-
 struct TEB
 {
     struct _NT_TIB NtTib;
@@ -49,14 +40,6 @@ typedef BOOL(WINAPI* CreateProcessWithTokenW_t) (HANDLE hToken, DWORD dwLogonFla
 #define CreateProcessWithLogonW_SW2_HASH 0x39A92305
 #define CreateProcessWithTokenW_SW2_HASH 0x03A92535
 
-PHANDLE_LIST find_token_handles_in_process(
-    IN DWORD process_pid,
-    IN DWORD permissions);
-
-PHANDLE_LIST find_process_handles_in_process(
-    IN DWORD process_pid,
-    IN DWORD permissions);
-
 VOID change_pid(
     IN DWORD new_pid,
     OUT PDWORD previous_pid);
@@ -81,7 +64,7 @@ BOOL check_if_succeded(
 VOID kill_created_processes(
     IN PPROCESS_LIST created_processes);
 
-BOOL MalSecLogon(
+BOOL malseclogon_handle_leak(
     IN LPCSTR binary_path,
     IN LPCSTR dump_path,
     IN BOOL fork_lsass,

