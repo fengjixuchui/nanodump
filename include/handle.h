@@ -153,59 +153,93 @@ typedef struct _HANDLE_LIST
     HANDLE Handle[MAX_HANDLES];
 } HANDLE_LIST, *PHANDLE_LIST;
 
-PHANDLE_LIST find_token_handles_in_process(
+BOOL find_token_handles_in_process(
     IN DWORD process_pid,
-    IN DWORD permissions);
+    IN DWORD permissions,
+    OUT PHANDLE_LIST* phandle_list);
 
-PHANDLE_LIST find_process_handles_in_process(
+BOOL find_process_handles_in_process(
     IN DWORD process_pid,
-    IN DWORD permissions);
+    IN DWORD permissions,
+    OUT PHANDLE_LIST* phandle_list);
 
 BOOL check_handle_privs(
     IN HANDLE handle,
     IN DWORD permissions);
 
-HANDLE make_handle_full_access(
-    IN HANDLE hProcess);
+HANDLE elevate_handle_via_duplicate(
+    IN HANDLE hProcess,
+    IN ACCESS_MASK DesiredAccess,
+    IN DWORD HandleAttributes);
 
-HANDLE obtain_lsass_handle(
+HANDLE make_handle_full_access(
+    IN HANDLE hProcess,
+    IN DWORD attributes);
+
+BOOL obtain_lsass_handle(
+    OUT PHANDLE phProcess,
+    IN DWORD lsass_pid,
+    IN BOOL duplicate_handle,
+    IN BOOL elevate_handle,
+    IN BOOL duplicate_elevate,
+    IN BOOL use_seclogon_duplicate,
+    IN DWORD spoof_callstack,
+    IN BOOL is_seclogon_leak_local_stage_2,
+    IN LPCSTR seclogon_leak_remote_binary,
+    OUT PPROCESS_LIST* Pcreated_processes,
+    IN BOOL use_valid_sig,
+    IN LPCSTR dump_path,
+    IN BOOL fork_lsass,
+    IN BOOL snapshot_lsass,
+    OUT PHANDLE PhSnapshot,
+    IN BOOL use_seclogon_leak_local,
+    IN BOOL use_seclogon_leak_remote,
+    IN BOOL use_lsass_shtinkering);
+
+HANDLE open_handle_to_lsass(
     IN DWORD lsass_pid,
     IN DWORD permissions,
     IN BOOL dup,
     IN BOOL seclogon_race,
-    IN DWORD spoof_stack,
+    IN DWORD spoof_callstack,
     IN BOOL is_malseclogon_stage_2,
-    IN LPCSTR dump_path);
+    IN DWORD attributes);
 
 HANDLE find_lsass(
-    IN DWORD dwFlags);
+    IN DWORD dwFlags,
+    IN DWORD attributes);
 
 HANDLE get_process_handle(
     IN DWORD dwPid,
     IN DWORD dwFlags,
-    IN BOOL quiet);
+    IN BOOL quiet,
+    IN DWORD attributes);
 
-PSYSTEM_HANDLE_INFORMATION get_all_handles(VOID);
+BOOL get_all_handles(
+    OUT PSYSTEM_HANDLE_INFORMATION* phandle_table);
 
 BOOL process_is_included(
     IN PPROCESS_LIST process_list,
     IN ULONG ProcessId);
 
-PPROCESS_LIST get_processes_from_handle_table(
-    IN PSYSTEM_HANDLE_INFORMATION handleTableInformation);
+BOOL get_processes_from_handle_table(
+    IN PSYSTEM_HANDLE_INFORMATION handleTableInformation,
+    OUT PPROCESS_LIST* pprocess_list);
 
-POBJECT_TYPES_INFORMATION QueryObjectTypesInfo(VOID);
+POBJECT_TYPES_INFORMATION query_object_types_info(VOID);
 
-BOOL GetTypeIndexByName(
+BOOL get_type_index_by_name(
     IN LPWSTR handle_type,
     OUT PULONG ProcesTypeIndex);
 
 HANDLE duplicate_lsass_handle(
     IN DWORD lsass_pid,
-    IN DWORD permissions);
+    IN DWORD permissions,
+    IN DWORD attributes);
 
 HANDLE fork_process(
-    IN HANDLE hProcess);
+    IN HANDLE hProcess,
+    IN DWORD attributes);
 
 HANDLE snapshot_process(
     IN HANDLE hProcess,

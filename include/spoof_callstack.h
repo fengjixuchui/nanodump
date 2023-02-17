@@ -9,6 +9,8 @@
 #include "utils.h"
 #include "dinvoke.h"
 
+#define UNUSED(x) (void)(x)
+
 #define SVC_STACK 1
 #define WMI_STACK 2
 #define RPC_STACK 3
@@ -44,6 +46,7 @@ typedef struct _STACK_FRAME {
     BOOL pushRbp;
     ULONG countOfCodes;
     BOOL pushRbpIndex;
+    BOOL is_valid;
 } STACK_FRAME, *PSTACK_FRAME;
 
 //
@@ -91,6 +94,7 @@ typedef struct _UNWIND_INFO {
 HANDLE open_handle_with_spoofed_callstack(
     IN DWORD stack_type,
     IN DWORD lsass_pid,
-    IN DWORD permissions);
+    IN DWORD permissions,
+    IN DWORD attributes);
 
 #endif

